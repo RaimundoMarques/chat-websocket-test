@@ -1,0 +1,9 @@
+# docker-compose.yml
+
+services:
+  chat-hub:
+    build: .
+    container_name: chat-hub
+    ports:
+      - "8765:8765"
+    restart: unless-stopped
