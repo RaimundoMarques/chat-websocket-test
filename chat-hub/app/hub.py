@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
+from uuid import uuid4
 
 from app import db
 from app import protocol as P
@@ -36,21 +38,48 @@ class HubState:
                 "invalid_profile",
                 f"Perfil inválido. Use: {', '.join(sorted(VALID_PROFILES))}",
             )
-        if any(u.username == username for u in self.users_by_id.values()):
-            # Se for uma reconexão (ex: refresh de página rápido), desconecta o socket anterior
-            old_user = next((u for u in self.users_by_id.values() if u.username == username), None)
-            if old_user and old_user.websocket != websocket:
-                await self.disconnect(old_user.websocket)
-                try:
-                    await old_user.websocket.close()
-                except (OSError, RuntimeError):
-                    pass
+
+        new_session_token = str(uuid4())
+
+        # Encerra qualquer sessão anterior ativa com este mesmo username (case-insensitive)
+        old_sockets = [
+            u.websocket
+            for u in self.users_by_id.values()
+            if u.username.lower() == username.lower() and u.websocket != websocket
+        ]
+
+        for old_ws in old_sockets:
+            try:
+                await old_ws.send(
+                    json.dumps(
+                        P.error(
+                            "session_replaced",
+                            "You were disconnected because this account logged in from another window or device.",
+                        ),
+                        ensure_ascii=False,
+                    )
+                )
+            except (OSError, RuntimeError):
+                pass
+            await self.disconnect(old_ws)
+            try:
+                await old_ws.close(code=4001, reason="session_replaced")
+            except (OSError, RuntimeError):
+                pass
 
         if websocket in self.users_by_ws:
             await self.disconnect(websocket)
 
-        user = User(username=username, profile=profile, websocket=websocket)
-        user.user_id = await repo.upsert_user(user.user_id, username, profile)
+        user = User(
+            username=username,
+            profile=profile,
+            websocket=websocket,
+            session_token=new_session_token,
+        )
+        if db.is_connected():
+            user.user_id = await repo.upsert_user(
+                user.user_id, username, profile, new_session_token
+            )
 
         self.users_by_ws[websocket] = user
         self.users_by_id[user.user_id] = user
@@ -76,11 +105,18 @@ class HubState:
             return user, P.ok(P.PROFILE_CHANGED, user=user.to_public())
 
         user.profile = profile
-        user.user_id = await repo.upsert_user(user.user_id, user.username, profile)
+        if db.is_connected():
+            user.user_id = await repo.upsert_user(
+                user.user_id, user.username, profile, user.session_token
+            )
         return user, P.ok(P.PROFILE_CHANGED, user=user.to_public())
 
     async def create_room(
-        self, user: User, name: str
+        self,
+        user: User,
+        name: str,
+        is_private: bool = False,
+        allowed_usernames: list[str] | None = None,
     ) -> tuple[Room | None, dict[str, Any]]:
         if user.profile not in ROOM_CREATOR_PROFILES:
             return None, P.error(
@@ -96,15 +132,26 @@ class HubState:
         if not name:
             return None, P.error("invalid_room_name", "Informe o nome da sala.")
 
+        cleaned_allowed: set[str] = set()
+        if is_private:
+            cleaned_allowed.add(user.username.lower())
+            if allowed_usernames:
+                for u in allowed_usernames:
+                    u_clean = (u or "").strip().lower()
+                    if u_clean:
+                        cleaned_allowed.add(u_clean)
+
         room = Room(
             name=name,
             created_by=user.user_id,
+            is_private=is_private,
+            allowed_usernames=cleaned_allowed,
         )
+        await repo.create_room(room)
         room.member_ids.add(user.user_id)
         self.rooms[room.room_id] = room
         user.room_id = room.room_id
 
-        await repo.create_room(room)
         return room, P.ok(P.ROOM_CREATED, room=room.to_public())
 
     async def join_room(
@@ -117,10 +164,72 @@ class HubState:
         if not room:
             return None, P.error("room_not_found", "Sala não encontrada.")
 
+        if room.is_private:
+            is_creator = (user.user_id == room.created_by)
+            is_allowed = (user.username.lower() in {u.lower() for u in room.allowed_usernames})
+            if not is_creator and not is_allowed:
+                return None, P.error(
+                    "forbidden_room",
+                    "Esta sala é reservada. Você não tem permissão para entrar.",
+                )
+
         room.member_ids.add(user.user_id)
         user.room_id = room.room_id
         await repo.add_member(room.room_id, user.user_id)
         return room, P.ok(P.ROOM_JOINED, room=room.to_public())
+
+    async def add_room_member_permission(
+        self, user: User, room_id: str, target_username: str
+    ) -> tuple[Room | None, dict[str, Any]]:
+        room = self.rooms.get(room_id)
+        if not room:
+            return None, P.error("room_not_found", "Sala não encontrada.")
+
+        if room.created_by != user.user_id:
+            return None, P.error(
+                "forbidden", "Apenas o criador da sala pode gerenciar convidados."
+            )
+
+        target_clean = (target_username or "").strip().lower()
+        if not target_clean:
+            return None, P.error("invalid_username", "Informe o username.")
+
+        room.allowed_usernames.add(target_clean)
+        await repo.add_room_allowed_user(room.room_id, target_clean)
+        return room, P.ok(P.ROOM_PERMISSIONS_UPDATED, room=room.to_public())
+
+    async def remove_room_member_permission(
+        self, user: User, room_id: str, target_username: str
+    ) -> tuple[Room | None, dict[str, Any], User | None]:
+        room = self.rooms.get(room_id)
+        if not room:
+            return None, P.error("room_not_found", "Sala não encontrada."), None
+
+        if room.created_by != user.user_id:
+            return None, P.error(
+                "forbidden", "Apenas o criador da sala pode gerenciar convidados."
+            ), None
+
+        target_clean = (target_username or "").strip().lower()
+        creator_user = self.users_by_id.get(room.created_by)
+        if creator_user and target_clean == creator_user.username.lower():
+            return None, P.error("cannot_remove_creator", "Não é possível remover o criador da sala."), None
+
+        room.allowed_usernames.discard(target_clean)
+        await repo.remove_room_allowed_user(room.room_id, target_clean)
+
+        # Se o usuário removido estiver atualmente conectado na sala, expulsa-o da sala
+        kicked_user: User | None = None
+        for member in self.room_members(room):
+            if member.username.lower() == target_clean:
+                kicked_user = member
+                member.room_id = None
+                room.member_ids.discard(member.user_id)
+                if db.is_connected():
+                    await repo.remove_member(room.room_id, member.user_id)
+                break
+
+        return room, P.ok(P.ROOM_PERMISSIONS_UPDATED, room=room.to_public()), kicked_user
 
     async def leave_room(
         self, user: User
@@ -151,6 +260,29 @@ class HubState:
         rooms = [r.to_public() for r in self.rooms.values()]
         return P.ok(P.ROOMS_LIST, rooms=rooms)
 
+    async def list_users(self) -> dict[str, Any]:
+        db_users = await repo.list_all_users() if db.is_connected() else []
+        online_usernames = {u.username.lower() for u in self.users_by_id.values()}
+
+        known_map = {u["username"].lower(): dict(u) for u in db_users}
+        for u in self.users_by_id.values():
+            if u.username.lower() not in known_map:
+                known_map[u.username.lower()] = {
+                    "user_id": u.user_id,
+                    "username": u.username,
+                    "profile": u.profile,
+                }
+
+        users_list = []
+        for u_data in sorted(known_map.values(), key=lambda x: x["username"].lower()):
+            users_list.append({
+                "user_id": u_data["user_id"],
+                "username": u_data["username"],
+                "profile": u_data["profile"],
+                "is_online": u_data["username"].lower() in online_usernames,
+            })
+        return P.ok(P.USERS_LIST, users=users_list)
+
     async def disconnect(self, websocket: Any) -> tuple[User | None, Room | None]:
         user = self.users_by_ws.pop(websocket, None)
         if not user:
@@ -165,6 +297,10 @@ class HubState:
                 if db.is_connected():
                     await repo.remove_member(room.room_id, user.user_id)
         user.room_id = None
+
+        if db.is_connected():
+            await repo.clear_user_session(user.user_id, user.session_token)
+
         return user, room
 
     def room_members(self, room: Room) -> list[User]:

@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+import asyncpg
 import websockets
 
 from app import protocol as P
@@ -35,7 +36,7 @@ async def _broadcast_room(
             continue
         try:
             await member.websocket.send(raw)
-        except Exception:
+        except (OSError, RuntimeError):
             pass
 
 
@@ -64,7 +65,18 @@ async def _broadcast_rooms_list_to_lobby(state: HubState) -> None:
             continue
         try:
             await user.websocket.send(raw)
-        except Exception:
+        except (OSError, RuntimeError):
+            pass
+
+
+async def _broadcast_users_list(state: HubState) -> None:
+    """Atualiza a lista de usuários conhecidos/online para todos os clientes."""
+    payload = await state.list_users()
+    raw = json.dumps(payload, ensure_ascii=False)
+    for user in state.users_by_id.values():
+        try:
+            await user.websocket.send(raw)
+        except (OSError, RuntimeError):
             pass
 
 
@@ -75,7 +87,13 @@ class ConnectionHandler:
     async def handle(self, websocket: Any) -> None:
         try:
             async for raw in websocket:
-                await self._on_message(websocket, raw)
+                try:
+                    await self._on_message(websocket, raw)
+                except websockets.ConnectionClosed:
+                    raise
+                except (asyncpg.PostgresError, OSError, RuntimeError, ValueError, KeyError) as exc:
+                    print(f"Error handling message: {exc}", flush=True)
+                    await _send(websocket, P.error("server_error", "Erro interno no servidor."))
         except websockets.ConnectionClosed:
             pass
         finally:
@@ -98,7 +116,8 @@ class ConnectionHandler:
                 )
                 await _notify_room_update(self.state, room)
             await _broadcast_rooms_list_to_lobby(self.state)
-        except Exception:
+            await _broadcast_users_list(self.state)
+        except (OSError, RuntimeError):
             pass
 
     async def _on_message(self, websocket: Any, raw: str | bytes) -> None:
@@ -127,6 +146,8 @@ class ConnectionHandler:
             await _send(websocket, response)
             if user and response.get("type") == P.AUTH_OK:
                 await _send(websocket, await self.state.list_rooms())
+                await _send(websocket, await self.state.list_users())
+                await _broadcast_users_list(self.state)
             return
 
         if user is None:
@@ -134,10 +155,47 @@ class ConnectionHandler:
             return
 
         if msg_type == P.CREATE_ROOM:
-            room, response = await self.state.create_room(user, data.get("name", ""))
+            room, response = await self.state.create_room(
+                user,
+                data.get("name", ""),
+                is_private=bool(data.get("is_private", False)),
+                allowed_usernames=data.get("allowed_usernames") or [],
+            )
             await _send(websocket, response)
             if room and response.get("type") == P.ROOM_CREATED:
                 await _send_chat_history(websocket, room.room_id)
+                await _broadcast_rooms_list_to_lobby(self.state)
+            return
+
+        if msg_type == P.ADD_ROOM_MEMBER:
+            room, response = await self.state.add_room_member_permission(
+                user, data.get("room_id", ""), data.get("username", "")
+            )
+            await _send(websocket, response)
+            if room and response.get("type") == P.ROOM_PERMISSIONS_UPDATED:
+                await _notify_room_update(self.state, room)
+                await _broadcast_rooms_list_to_lobby(self.state)
+            return
+
+        if msg_type == P.REMOVE_ROOM_MEMBER:
+            room, response, kicked_user = await self.state.remove_room_member_permission(
+                user, data.get("room_id", ""), data.get("username", "")
+            )
+            await _send(websocket, response)
+            if room and response.get("type") == P.ROOM_PERMISSIONS_UPDATED:
+                if kicked_user:
+                    try:
+                        await _send(
+                            kicked_user.websocket,
+                            P.ok(P.ROOM_LEFT, room_id=room.room_id),
+                        )
+                        await _send(
+                            kicked_user.websocket,
+                            P.error("kicked", "Você foi removido da sala pelo Host."),
+                        )
+                    except (OSError, RuntimeError):
+                        pass
+                await _notify_room_update(self.state, room)
                 await _broadcast_rooms_list_to_lobby(self.state)
             return
 
@@ -186,11 +244,17 @@ class ConnectionHandler:
             await _send(websocket, await self.state.list_rooms())
             return
 
+        if msg_type == P.LIST_USERS:
+            await _send(websocket, await self.state.list_users())
+            return
+
         if msg_type == P.CHANGE_PROFILE:
             _, response = await self.state.change_profile(
                 user, data.get("profile", "")
             )
             await _send(websocket, response)
+            if response.get("type") == P.PROFILE_CHANGED:
+                await _broadcast_users_list(self.state)
             return
 
         if msg_type == P.CHAT:

@@ -7,12 +7,21 @@ export type User = {
   room_id: string | null
 }
 
+export type KnownUser = {
+  user_id: string
+  username: string
+  profile: Profile
+  is_online: boolean
+}
+
 export type Room = {
   room_id: string
   name: string
   created_by: string
+  is_private: boolean
   members: string[]
   member_count: number
+  allowed_usernames?: string[]
 }
 
 export type ChatLine = {
@@ -37,7 +46,9 @@ export type ServerMessage =
   | { type: 'room_joined'; room: Room }
   | { type: 'room_left'; room_id: string }
   | { type: 'rooms_list'; rooms: Room[] }
+  | { type: 'users_list'; users: KnownUser[] }
   | { type: 'room_update'; room: Room }
+  | { type: 'room_permissions_updated'; room: Room }
   | { type: 'chat_history'; room_id: string; messages: ChatMessage[] }
   | { type: 'chat'; room_id: string; id: number; from_user: User; text: string; ts: string }
   | { type: 'system'; room_id: string; event: string; user: User; ts: string }

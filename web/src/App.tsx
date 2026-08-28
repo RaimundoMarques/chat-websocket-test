@@ -1,18 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ChatSocket, getWsUrl } from './lib/ws'
-import type { ChatLine, Profile, Room, ServerMessage, User } from './types'
+import type { ChatLine, KnownUser, Profile, Room, ServerMessage, User } from './types'
 
 type Screen = 'login' | 'lobby' | 'room'
 type Status = 'idle' | 'connecting' | 'online' | 'offline' | 'error'
 type Theme = 'light' | 'dark'
 
-interface SessionData {
-  username: string
-  profile: Profile
-  roomId: string | null
-}
-
-const SESSION_STORAGE_KEY = 'chathub_session'
 const THEME_STORAGE_KEY = 'chathub_theme'
 
 function getInitialTheme(): Theme {
@@ -26,40 +19,6 @@ function getInitialTheme(): Theme {
     // ignore
   }
   return 'light'
-}
-
-function loadSavedSession(): SessionData | null {
-  try {
-    const raw = localStorage.getItem(SESSION_STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<SessionData>
-    if (
-      typeof parsed.username === 'string' &&
-      parsed.username.trim() &&
-      (parsed.profile === 'host' || parsed.profile === 'member')
-    ) {
-      return {
-        username: parsed.username.trim(),
-        profile: parsed.profile,
-        roomId: typeof parsed.roomId === 'string' ? parsed.roomId : null,
-      }
-    }
-  } catch {
-    // ignore parsing errors
-  }
-  return null
-}
-
-function saveSession(data: SessionData | null) {
-  try {
-    if (data) {
-      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data))
-    } else {
-      localStorage.removeItem(SESSION_STORAGE_KEY)
-    }
-  } catch {
-    // ignore storage errors
-  }
 }
 
 let lineSeq = 0
@@ -80,6 +39,12 @@ export default function App() {
   const [username, setUsername] = useState('')
   const [profile, setProfile] = useState<Profile>('member')
   const [roomName, setRoomName] = useState('')
+  const [isPrivate, setIsPrivate] = useState(false)
+  const [selectedAllowedUsers, setSelectedAllowedUsers] = useState<string[]>([])
+  const [knownUsers, setKnownUsers] = useState<KnownUser[]>([])
+  const [userSearchQuery, setUserSearchQuery] = useState('')
+  const [manageUserSearchQuery, setManageUserSearchQuery] = useState('')
+  const [inviteInput, setInviteInput] = useState('')
   const [draft, setDraft] = useState('')
 
   const socketRef = useRef<ChatSocket | null>(null)
@@ -91,6 +56,46 @@ export default function App() {
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
   const wsUrl = useMemo(() => getWsUrl(), [])
+
+  const otherKnownUsers = useMemo(() => {
+    if (!user) return []
+    const currentLower = user.username.toLowerCase()
+    return knownUsers
+      .filter((u) => u.username.toLowerCase() !== currentLower)
+      .sort((a, b) => {
+        if (a.is_online !== b.is_online) {
+          return a.is_online ? -1 : 1
+        }
+        return a.username.localeCompare(b.username)
+      })
+  }, [knownUsers, user])
+
+  const filteredLobbyUsers = useMemo(() => {
+    const q = userSearchQuery.trim().toLowerCase()
+    if (!q) return otherKnownUsers
+    return otherKnownUsers.filter((u) => u.username.toLowerCase().includes(q))
+  }, [otherKnownUsers, userSearchQuery])
+
+  const availableToInvite = useMemo(() => {
+    if (!user || !room) return []
+    const currentLower = user.username.toLowerCase()
+    const allowedLower = new Set((room.allowed_usernames || []).map((u) => u.toLowerCase()))
+    return knownUsers
+      .filter((u) => {
+        const uLower = u.username.toLowerCase()
+        return uLower !== currentLower && !allowedLower.has(uLower)
+      })
+      .sort((a, b) => {
+        if (a.is_online !== b.is_online) return a.is_online ? -1 : 1
+        return a.username.localeCompare(b.username)
+      })
+  }, [knownUsers, user, room])
+
+  const filteredManageUsers = useMemo(() => {
+    const q = manageUserSearchQuery.trim().toLowerCase()
+    if (!q) return availableToInvite
+    return availableToInvite.filter((u) => u.username.toLowerCase().includes(q))
+  }, [availableToInvite, manageUserSearchQuery])
 
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme)
@@ -116,11 +121,6 @@ export default function App() {
         userRef.current = msg.user
         setStatus('online')
         setError(null)
-        saveSession({
-          username: msg.user.username,
-          profile: msg.user.profile,
-          roomId: targetRoomId.current,
-        })
 
         if (targetRoomId.current) {
           socketRef.current?.send({ type: 'join_room', room_id: targetRoomId.current })
@@ -134,15 +134,14 @@ export default function App() {
         userRef.current = msg.user
         setProfile(msg.user.profile)
         setError(null)
-        saveSession({
-          username: msg.user.username,
-          profile: msg.user.profile,
-          roomId: roomRef.current ? roomRef.current.room_id : null,
-        })
         break
 
       case 'rooms_list':
         setRooms(msg.rooms)
+        break
+
+      case 'users_list':
+        setKnownUsers(msg.users)
         break
 
       case 'room_created':
@@ -158,13 +157,6 @@ export default function App() {
         setScreen('room')
         setError(null)
         targetRoomId.current = msg.room.room_id
-        if (userRef.current) {
-          saveSession({
-            username: userRef.current.username,
-            profile: userRef.current.profile,
-            roomId: msg.room.room_id,
-          })
-        }
         break
 
       case 'chat_history':
@@ -180,6 +172,7 @@ export default function App() {
         break
 
       case 'room_update':
+      case 'room_permissions_updated':
         setRoom((current) => {
           const next = current && current.room_id === msg.room.room_id ? msg.room : current
           roomRef.current = next
@@ -202,13 +195,6 @@ export default function App() {
         setLines([])
         setScreen('lobby')
         targetRoomId.current = null
-        if (userRef.current) {
-          saveSession({
-            username: userRef.current.username,
-            profile: userRef.current.profile,
-            roomId: null,
-          })
-        }
         break
 
       case 'chat':
@@ -232,23 +218,33 @@ export default function App() {
             kind: 'system',
             text:
               msg.event === 'user_joined'
-                ? `${msg.user.username} entrou`
-                : `${msg.user.username} saiu`,
+                ? `${msg.user.username} joined`
+                : `${msg.user.username} left`,
             ts: msg.ts,
           },
         ])
         break
 
       case 'error':
-        if (msg.code === 'room_not_found') {
+        if (msg.code === 'session_replaced') {
           targetRoomId.current = null
-          if (userRef.current) {
-            saveSession({
-              username: userRef.current.username,
-              profile: userRef.current.profile,
-              roomId: null,
-            })
-          }
+          userRef.current = null
+          roomRef.current = null
+          setUser(null)
+          setRoom(null)
+          setRooms([])
+          setKnownUsers([])
+          setSelectedAllowedUsers([])
+          setLines([])
+          setScreen('login')
+          setStatus('idle')
+          setError(msg.message)
+          socketRef.current?.close()
+          socketRef.current = null
+          break
+        }
+        if (msg.code === 'room_not_found' || msg.code === 'forbidden_room' || msg.code === 'kicked') {
+          targetRoomId.current = null
           setScreen('lobby')
         }
         setError(msg.message)
@@ -276,13 +272,24 @@ export default function App() {
           setStatus('online')
         }
       },
-      onClose: () => {
-        setStatus('offline')
+      onClose: (ev) => {
+        setStatus('idle')
         socketRef.current = null
+        userRef.current = null
+        roomRef.current = null
+        targetRoomId.current = null
+        setUser(null)
+        setRoom(null)
+        setRooms([])
+        setLines([])
+        setScreen('login')
+        if (ev?.code === 4001 || ev?.reason === 'session_replaced') {
+          setError('You were disconnected because this account logged in from another window or device.')
+        }
       },
       onError: () => {
         setStatus('error')
-        setError('Não foi possível conectar ao chatHub.')
+        setError('Unable to connect to chatHub.')
       },
       onMessage: (msg) => handleMessageRef.current(msg),
     })
@@ -304,16 +311,7 @@ export default function App() {
     }
   }
 
-  // Restaura sessão do localStorage automaticamente ao carregar/dar refresh
   useEffect(() => {
-    const saved = loadSavedSession()
-    if (saved) {
-      setUsername(saved.username)
-      setProfile(saved.profile)
-      targetRoomId.current = saved.roomId
-      connectWith(saved.username, saved.profile)
-    }
-
     return () => {
       socketRef.current?.close()
       socketRef.current = null
@@ -324,14 +322,13 @@ export default function App() {
     e.preventDefault()
     const name = username.trim()
     if (!name) {
-      setError('Informe um username.')
+      setError('Please enter a username.')
       return
     }
     connectWith(name, profile)
   }
 
   function logout() {
-    saveSession(null)
     targetRoomId.current = null
     userRef.current = null
     roomRef.current = null
@@ -340,25 +337,79 @@ export default function App() {
     setUser(null)
     setRoom(null)
     setRooms([])
+    setKnownUsers([])
+    setSelectedAllowedUsers([])
+    setUserSearchQuery('')
+    setManageUserSearchQuery('')
     setLines([])
     setScreen('login')
     setStatus('idle')
     setError(null)
   }
 
-  function refreshRooms() {
-    socketRef.current?.send({ type: 'list_rooms' })
+  function toggleAllowedUser(targetName: string) {
+    setSelectedAllowedUsers((prev) =>
+      prev.includes(targetName) ? prev.filter((name) => name !== targetName) : [...prev, targetName],
+    )
+  }
+
+  function selectAllOnline() {
+    const onlineNames = otherKnownUsers.filter((u) => u.is_online).map((u) => u.username)
+    setSelectedAllowedUsers((prev) => Array.from(new Set([...prev, ...onlineNames])))
+  }
+
+  function clearSelectedUsers() {
+    setSelectedAllowedUsers([])
   }
 
   function createRoom(e: FormEvent) {
     e.preventDefault()
     const name = roomName.trim()
     if (!name) {
-      setError('Informe o nome da sala.')
+      setError('Please enter a room name.')
       return
     }
-    socketRef.current?.send({ type: 'create_room', name })
+
+    socketRef.current?.send({
+      type: 'create_room',
+      name,
+      is_private: isPrivate,
+      allowed_usernames: isPrivate ? selectedAllowedUsers : [],
+    })
     setRoomName('')
+    setIsPrivate(false)
+    setSelectedAllowedUsers([])
+    setUserSearchQuery('')
+  }
+
+  function quickInvite(targetUsername: string) {
+    if (!room) return
+    socketRef.current?.send({
+      type: 'add_room_member',
+      room_id: room.room_id,
+      username: targetUsername,
+    })
+  }
+
+  function addMemberPermission(e: FormEvent) {
+    e.preventDefault()
+    const target = inviteInput.trim()
+    if (!target || !room) return
+    socketRef.current?.send({
+      type: 'add_room_member',
+      room_id: room.room_id,
+      username: target,
+    })
+    setInviteInput('')
+  }
+
+  function removeMemberPermission(targetUsername: string) {
+    if (!room) return
+    socketRef.current?.send({
+      type: 'remove_room_member',
+      room_id: room.room_id,
+      username: targetUsername,
+    })
   }
 
   function joinRoom(roomId: string) {
@@ -390,7 +441,7 @@ export default function App() {
           <span className="brand-mark">ch</span>
           <div>
             <p className="brand-name">chatHub</p>
-            <p className="brand-sub">salas em tempo real</p>
+            <p className="brand-sub">real-time chat rooms</p>
           </div>
         </div>
         <div className="panel-actions">
@@ -398,8 +449,8 @@ export default function App() {
             type="button"
             className="theme-toggle"
             onClick={toggleTheme}
-            title={theme === 'dark' ? 'Mudar para tema claro' : 'Mudar para tema escuro'}
-            aria-label={theme === 'dark' ? 'Mudar para tema claro' : 'Mudar para tema escuro'}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           >
             {theme === 'dark' ? (
               <svg
@@ -444,8 +495,8 @@ export default function App() {
             {statusLabel(status)}
           </div>
           {user && (
-            <button type="button" className="ghost danger" onClick={logout} title="Desconectar do chatHub">
-              Sair da conta
+            <button type="button" className="ghost danger" onClick={logout} title="Sign out of chatHub">
+              Sign out
             </button>
           )}
         </div>
@@ -456,10 +507,10 @@ export default function App() {
 
         {screen === 'login' && (
           <section className="panel login-panel">
-            <h1>Entrar no hub</h1>
+            <h1>Join the Hub</h1>
             <p className="lead">
-              Informe um username e conecte para ver as salas. Só usuários autenticados
-              podem entrar. Hosts criam salas; members entram e conversam.
+              Enter a username and connect to view rooms. Only authenticated users
+              can enter. Hosts create rooms; members join and chat.
             </p>
             <form className="stack" onSubmit={onLogin}>
               <label>
@@ -467,12 +518,12 @@ export default function App() {
                 <input
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="ex.: Ana"
+                  placeholder="e.g. Alice"
                   autoFocus
                 />
               </label>
               <fieldset className="profiles">
-                <legend>Perfil</legend>
+                <legend>Role</legend>
                 <label className={profile === 'host' ? 'chip active' : 'chip'}>
                   <input
                     type="radio"
@@ -493,7 +544,7 @@ export default function App() {
                 </label>
               </fieldset>
               <button type="submit" disabled={status === 'connecting'}>
-                {status === 'connecting' ? 'Conectando…' : 'Conectar'}
+                {status === 'connecting' ? 'Connecting…' : 'Connect'}
               </button>
             </form>
             <p className="hint">WS: {wsUrl}</p>
@@ -504,21 +555,16 @@ export default function App() {
           <section className="panel lobby-panel">
             <div className="panel-head">
               <div>
-                <h1>Salas</h1>
+                <h1>Rooms</h1>
                 <p className="lead">
-                  Olá, <strong>{user.username}</strong>
+                  Hello, <strong>{user.username}</strong>
                   <span className="profile-badge">{user.profile}</span>
                 </p>
-              </div>
-              <div className="panel-actions">
-                <button type="button" className="ghost" onClick={refreshRooms}>
-                  Atualizar
-                </button>
               </div>
             </div>
 
             <fieldset className="profiles lobby-profiles">
-              <legend>Trocar perfil</legend>
+              <legend>Switch role</legend>
               <div className="profile-options">
                 <label className={user.profile === 'host' ? 'chip active' : 'chip'}>
                   <input
@@ -542,30 +588,126 @@ export default function App() {
             </fieldset>
 
             {user.profile === 'host' && (
-              <form className="inline-form" onSubmit={createRoom}>
-                <input
-                  value={roomName}
-                  onChange={(e) => setRoomName(e.target.value)}
-                  placeholder="Nome da nova sala"
-                />
-                <button type="submit">Criar sala</button>
+              <form className="create-room-form" onSubmit={createRoom}>
+                <div className="inline-form">
+                  <input
+                    value={roomName}
+                    onChange={(e) => setRoomName(e.target.value)}
+                    placeholder="New room name"
+                  />
+                  <button type="submit">Create room</button>
+                </div>
+                <div className="privacy-options">
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={isPrivate}
+                      onChange={(e) => {
+                        setIsPrivate(e.target.checked)
+                        if (!e.target.checked) {
+                          setSelectedAllowedUsers([])
+                        }
+                      }}
+                    />
+                    <span>Private / Reserved Room 🔒</span>
+                  </label>
+                  {isPrivate && (
+                    <div className="privacy-config-box">
+                      {otherKnownUsers.length > 0 ? (
+                        <div className="user-picker">
+                          <div className="picker-header">
+                            <span className="picker-title">
+                              Select existing users ({otherKnownUsers.length} total · {otherKnownUsers.filter((u) => u.is_online).length} online):
+                            </span>
+                            <div className="picker-actions">
+                              {otherKnownUsers.some((u) => u.is_online) && (
+                                <button
+                                  type="button"
+                                  className="btn-tiny"
+                                  onClick={selectAllOnline}
+                                  title="Select all online users"
+                                >
+                                  + All Online
+                                </button>
+                              )}
+                              {selectedAllowedUsers.length > 0 && (
+                                <button
+                                  type="button"
+                                  className="btn-tiny ghost"
+                                  onClick={clearSelectedUsers}
+                                  title="Clear selected users"
+                                >
+                                  Clear
+                                </button>
+                              )}
+                            </div>
+                          </div>
+
+                          {otherKnownUsers.length > 4 && (
+                            <input
+                              type="text"
+                              className="search-filter-input"
+                              value={userSearchQuery}
+                              onChange={(e) => setUserSearchQuery(e.target.value)}
+                              placeholder="🔍 Filter users by name..."
+                            />
+                          )}
+
+                          <div className="picker-scroll-container">
+                            <div className="picker-chips">
+                              {filteredLobbyUsers.map((u) => {
+                                const isSelected = selectedAllowedUsers.includes(u.username)
+                                return (
+                                  <button
+                                    type="button"
+                                    key={u.user_id || u.username}
+                                    className={`picker-chip ${isSelected ? 'active' : ''}`}
+                                    onClick={() => toggleAllowedUser(u.username)}
+                                    title={`${u.username} (${u.is_online ? 'online' : 'offline'})`}
+                                  >
+                                    <span className={`status-indicator ${u.is_online ? 'online' : 'offline'}`} />
+                                    <span className="user-name">{u.username}</span>
+                                    <span className="chip-badge">{isSelected ? '✓' : '+'}</span>
+                                  </button>
+                                )
+                              })}
+                              {filteredLobbyUsers.length === 0 && (
+                                <span className="no-matches">No users matching "{userSearchQuery}"</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="no-matches">No other registered users yet.</span>
+                      )}
+                      {selectedAllowedUsers.length > 0 && (
+                        <div className="selected-summary">
+                          Selected users ({selectedAllowedUsers.length}): <strong>{selectedAllowedUsers.join(', ')}</strong>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </form>
             )}
 
             <ul className="room-list">
               {rooms.length === 0 && (
-                <li className="empty">Nenhuma sala aberta. Aguarde um host criar uma.</li>
+                <li className="empty">No open rooms. Wait for a host to create one.</li>
               )}
               {rooms.map((r) => (
                 <li key={r.room_id}>
                   <div>
-                    <strong>{r.name}</strong>
+                    <strong className="room-title">
+                      {r.name}
+                      {r.is_private && <span className="private-badge" title="Reserved / Private room">🔒 Private</span>}
+                    </strong>
                     <span>
                       {r.member_count} online · {r.room_id}
                     </span>
                   </div>
                   <button type="button" onClick={() => joinRoom(r.room_id)}>
-                    Entrar
+                    Join
                   </button>
                 </li>
               ))}
@@ -577,19 +719,99 @@ export default function App() {
           <section className="panel room-panel">
             <div className="panel-head">
               <div>
-                <h1>{room.name}</h1>
+                <h1 className="room-title">
+                  {room.name}
+                  {room.is_private && <span className="private-badge">🔒 Private</span>}
+                </h1>
                 <p className="lead">
                   {room.member_count} online · {user.username}
                 </p>
               </div>
               <button type="button" className="ghost" onClick={leaveRoom}>
-                Sair da sala
+                Leave room
               </button>
             </div>
 
+            {room.is_private && room.created_by === user.user_id && (
+              <div className="management-box">
+                <header className="management-head">
+                  <strong>Manage Allowed Users 🔒</strong>
+                </header>
+                <form className="inline-form manage-form" onSubmit={addMemberPermission}>
+                  <input
+                    value={inviteInput}
+                    onChange={(e) => setInviteInput(e.target.value)}
+                    placeholder="Username to grant access"
+                  />
+                  <button type="submit">Invite</button>
+                </form>
+
+                {availableToInvite.length > 0 && (
+                  <div className="quick-invite-box">
+                    <div className="picker-header">
+                      <span className="picker-title">
+                        Quick invite existing users ({availableToInvite.length} available):
+                      </span>
+                    </div>
+
+                    {availableToInvite.length > 4 && (
+                      <input
+                        type="text"
+                        className="search-filter-input"
+                        value={manageUserSearchQuery}
+                        onChange={(e) => setManageUserSearchQuery(e.target.value)}
+                        placeholder="🔍 Filter users to invite..."
+                      />
+                    )}
+
+                    <div className="picker-scroll-container">
+                      <div className="picker-chips">
+                        {filteredManageUsers.map((u) => (
+                          <button
+                            type="button"
+                            key={u.user_id || u.username}
+                            className="picker-chip"
+                            onClick={() => quickInvite(u.username)}
+                            title={`Grant access to ${u.username} (${u.is_online ? 'online' : 'offline'})`}
+                          >
+                            <span className={`status-indicator ${u.is_online ? 'online' : 'offline'}`} />
+                            <span className="user-name">{u.username}</span>
+                            <span className="chip-badge">+</span>
+                          </button>
+                        ))}
+                        {filteredManageUsers.length === 0 && (
+                          <span className="no-matches">No users matching "{manageUserSearchQuery}"</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {room.allowed_usernames && room.allowed_usernames.length > 0 && (
+                  <div className="allowed-chips">
+                    {room.allowed_usernames.map((u) => (
+                      <span key={u} className="user-tag">
+                        {u}
+                        {u.toLowerCase() !== user.username.toLowerCase() && (
+                          <button
+                            type="button"
+                            className="remove-btn"
+                            onClick={() => removeMemberPermission(u)}
+                            title={`Revoke access for ${u}`}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="transcript">
               {lines.length === 0 && (
-                <p className="empty">Nenhuma mensagem ainda. Diga oi.</p>
+                <p className="empty">No messages yet. Say hello!</p>
               )}
               {lines.map((line) =>
                 line.kind === 'system' ? (
@@ -615,10 +837,10 @@ export default function App() {
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Escreva uma mensagem"
+                placeholder="Type a message..."
                 autoFocus
               />
-              <button type="submit">Enviar</button>
+              <button type="submit">Send</button>
             </form>
           </section>
         )}
@@ -630,14 +852,14 @@ export default function App() {
 function statusLabel(status: Status) {
   switch (status) {
     case 'connecting':
-      return 'conectando'
+      return 'connecting'
     case 'online':
       return 'online'
     case 'offline':
       return 'offline'
     case 'error':
-      return 'erro'
+      return 'error'
     default:
-      return 'pronto'
+      return 'ready'
   }
 }

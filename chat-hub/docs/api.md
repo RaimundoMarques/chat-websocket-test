@@ -23,10 +23,39 @@ Identifica o usuário na conexão. Obrigatório antes de qualquer outra ação.
 
 ### `create_room`
 
-Cria uma sala. Só `host`. O criador **entra automaticamente**.
+Cria uma sala. Só `host`. O criador **entra automaticamente**. Permite configurar privacidade (`is_private`) e convidados autorizados (`allowed_usernames`).
 
 ```json
-{"type": "create_room", "name": "Sala Demo"}
+{
+  "type": "create_room",
+  "name": "Sala Privada",
+  "is_private": true,
+  "allowed_usernames": ["ana", "carlos"]
+}
+```
+
+### `add_room_member`
+
+Exige que o usuário seja o Host criador da sala. Concede acesso para um usuário na sala privada.
+
+```json
+{
+  "type": "add_room_member",
+  "room_id": "abc12345",
+  "username": "denysson"
+}
+```
+
+### `remove_room_member`
+
+Exige que o usuário seja o Host criador da sala. Revoga o acesso e desconecta o usuário se ele estiver na sala.
+
+```json
+{
+  "type": "remove_room_member",
+  "room_id": "abc12345",
+  "username": "denysson"
+}
 ```
 
 ### `join_room`

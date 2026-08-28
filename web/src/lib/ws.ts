@@ -9,7 +9,7 @@ export function getWsUrl(): string {
 type Handlers = {
   onMessage: (msg: ServerMessage) => void
   onOpen?: () => void
-  onClose?: () => void
+  onClose?: (event: CloseEvent) => void
   onError?: () => void
 }
 
@@ -27,7 +27,7 @@ export class ChatSocket {
     this.ws = ws
 
     ws.onopen = () => this.handlers.onOpen?.()
-    ws.onclose = () => this.handlers.onClose?.()
+    ws.onclose = (ev) => this.handlers.onClose?.(ev)
     ws.onerror = () => this.handlers.onError?.()
     ws.onmessage = (event) => {
       try {
