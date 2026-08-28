@@ -45,6 +45,7 @@ class HubState:
             if err or not user_data:
                 return None, P.error("invalid_credentials", "Invalid username or password.")
             user_id = user_data["user_id"]
+            username = user_data["username"]
             profile = user_data["profile"]
             unit_id = user_data["unit_id"]
         else:
