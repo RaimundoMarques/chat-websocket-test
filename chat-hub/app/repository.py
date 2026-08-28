@@ -18,7 +18,7 @@ async def ensure_seed_data() -> None:
             """
             INSERT INTO units (id, name)
             VALUES
-                ('ICCT', 'Instituto de Ciência, Capacitação e Tecnologia'),
+                ('ICCT', 'Instituto Cal-Comp de Tecnologia e Inovação'),
                 ('F1', 'Fábrica F1'),
                 ('F2', 'Fábrica F2')
             ON CONFLICT (id) DO NOTHING
