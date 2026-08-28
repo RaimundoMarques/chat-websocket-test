@@ -151,8 +151,10 @@ class ConnectionHandler:
         if msg_type == P.AUTH:
             user, response = await self.state.authenticate(
                 websocket,
-                data.get("username", ""),
-                data.get("password", ""),
+                username=data.get("username", ""),
+                password=data.get("password", ""),
+                session_token=data.get("session_token", ""),
+                user_id=data.get("user_id", ""),
             )
             await _send(websocket, response)
             if user and response.get("type") == P.AUTH_OK:
@@ -160,6 +162,16 @@ class ConnectionHandler:
                 await _send(websocket, await self.state.list_users())
                 await _send(websocket, await self.state.list_units())
                 await _broadcast_users_list(self.state)
+            return
+
+        if msg_type == P.LOGOUT:
+            if user:
+                if db.is_connected():
+                    await repo.clear_user_session(user.user_id)
+                await self.state.disconnect(websocket)
+            await _send(websocket, P.ok("logout_ok"))
+            await _broadcast_rooms_list_to_lobby(self.state)
+            await _broadcast_users_list(self.state)
             return
 
         if user is None:

@@ -7,6 +7,7 @@ from typing import Any
 
 # --- Tipos enviados pelo cliente ---
 AUTH = "auth"
+LOGOUT = "logout"
 CREATE_ROOM = "create_room"
 JOIN_ROOM = "join_room"
 LEAVE_ROOM = "leave_room"

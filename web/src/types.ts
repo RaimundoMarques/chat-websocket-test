@@ -50,8 +50,16 @@ export type ChatMessage = {
   ts: string
 }
 
+export type SavedSession = {
+  user_id: string
+  username: string
+  session_token: string
+  room_id?: string | null
+}
+
 export type ServerMessage =
   | { type: 'auth_ok'; user: User }
+  | { type: 'logout_ok' }
   | { type: 'profile_changed'; user: User }
   | { type: 'room_created'; room: Room }
   | { type: 'room_joined'; room: Room }

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ChatSocket, getWsUrl } from './lib/ws'
-import type { ChatLine, KnownUser, Profile, Room, ServerMessage, Unit, User } from './types'
+import type { ChatLine, KnownUser, Profile, Room, SavedSession, ServerMessage, Unit, User } from './types'
 
 type Screen = 'login' | 'lobby' | 'room'
 type Status = 'idle' | 'connecting' | 'online' | 'offline' | 'error'
@@ -8,6 +8,7 @@ type Theme = 'light' | 'dark'
 type LobbyTab = 'rooms' | 'admin'
 
 const THEME_STORAGE_KEY = 'chathub_theme'
+const SESSION_STORAGE_KEY = 'chathub_session'
 
 function getInitialTheme(): Theme {
   try {
@@ -77,7 +78,12 @@ export default function App() {
   } | null>(null)
 
   const socketRef = useRef<ChatSocket | null>(null)
-  const pendingAuth = useRef<{ username: string; password: string } | null>(null)
+  const pendingAuth = useRef<{
+    username?: string
+    password?: string
+    user_id?: string
+    session_token?: string
+  } | null>(null)
   const targetRoomId = useRef<string | null>(null)
   const userRef = useRef<User | null>(null)
   const roomRef = useRef<Room | null>(null)
@@ -159,6 +165,20 @@ export default function App() {
         setStatus('online')
         setError(null)
 
+        try {
+          if (msg.user.session_token) {
+            const sessionData: SavedSession = {
+              user_id: msg.user.user_id,
+              username: msg.user.username,
+              session_token: msg.user.session_token,
+              room_id: targetRoomId.current || msg.user.room_id || null,
+            }
+            localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData))
+          }
+        } catch {
+          // ignore
+        }
+
         if (targetRoomId.current) {
           socketRef.current?.send({ type: 'join_room', room_id: targetRoomId.current })
         } else {
@@ -222,6 +242,17 @@ export default function App() {
         setScreen('room')
         setError(null)
         targetRoomId.current = msg.room.room_id
+
+        try {
+          const savedStr = localStorage.getItem(SESSION_STORAGE_KEY)
+          if (savedStr) {
+            const parsed = JSON.parse(savedStr)
+            parsed.room_id = msg.room.room_id
+            localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(parsed))
+          }
+        } catch {
+          // ignore
+        }
         break
 
       case 'chat_history':
@@ -260,6 +291,17 @@ export default function App() {
         setLines([])
         setScreen('lobby')
         targetRoomId.current = null
+
+        try {
+          const savedStr = localStorage.getItem(SESSION_STORAGE_KEY)
+          if (savedStr) {
+            const parsed = JSON.parse(savedStr)
+            parsed.room_id = null
+            localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(parsed))
+          }
+        } catch {
+          // ignore
+        }
         break
 
       case 'chat':
@@ -291,7 +333,12 @@ export default function App() {
         break
 
       case 'error':
-        if (msg.code === 'session_replaced') {
+        if (msg.code === 'session_replaced' || msg.code === 'invalid_session') {
+          try {
+            localStorage.removeItem(SESSION_STORAGE_KEY)
+          } catch {
+            // ignore
+          }
           targetRoomId.current = null
           userRef.current = null
           roomRef.current = null
@@ -311,6 +358,16 @@ export default function App() {
         if (msg.code === 'room_not_found' || msg.code === 'forbidden_room' || msg.code === 'kicked') {
           targetRoomId.current = null
           setScreen('lobby')
+          try {
+            const savedStr = localStorage.getItem(SESSION_STORAGE_KEY)
+            if (savedStr) {
+              const parsed = JSON.parse(savedStr)
+              parsed.room_id = null
+              localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(parsed))
+            }
+          } catch {
+            // ignore
+          }
         }
         setError(msg.message)
         setStatus((prev) => (prev === 'connecting' ? 'idle' : prev))
@@ -327,11 +384,20 @@ export default function App() {
       onOpen: () => {
         const pending = pendingAuth.current
         if (pending) {
-          socket.send({
-            type: 'auth',
-            username: pending.username,
-            password: pending.password,
-          })
+          if (pending.session_token && pending.user_id) {
+            socket.send({
+              type: 'auth',
+              user_id: pending.user_id,
+              session_token: pending.session_token,
+              username: pending.username || '',
+            })
+          } else if (pending.username && pending.password) {
+            socket.send({
+              type: 'auth',
+              username: pending.username,
+              password: pending.password,
+            })
+          }
           pendingAuth.current = null
         } else {
           setStatus('online')
@@ -349,6 +415,11 @@ export default function App() {
         setLines([])
         setScreen('login')
         if (ev?.code === 4001 || ev?.reason === 'session_replaced') {
+          try {
+            localStorage.removeItem(SESSION_STORAGE_KEY)
+          } catch {
+            // ignore
+          }
           setError('You were disconnected because this account logged in from another window or device.')
         }
       },
@@ -376,6 +447,33 @@ export default function App() {
     }
   }
 
+  // Auto-restore session on mount (such as page reload with F5 / Ctrl+F5)
+  useEffect(() => {
+    try {
+      const savedStr = localStorage.getItem(SESSION_STORAGE_KEY)
+      if (savedStr) {
+        const saved: SavedSession = JSON.parse(savedStr)
+        if (saved.user_id && saved.session_token) {
+          if (saved.room_id) {
+            targetRoomId.current = saved.room_id
+          }
+          setStatus('connecting')
+          pendingAuth.current = {
+            user_id: saved.user_id,
+            session_token: saved.session_token,
+            username: saved.username,
+          }
+          const socket = ensureSocket()
+          if (!socket.connected) {
+            socket.connect(wsUrl)
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, [wsUrl])
+
   useEffect(() => {
     return () => {
       socketRef.current?.close()
@@ -399,6 +497,14 @@ export default function App() {
   }
 
   function logout() {
+    try {
+      localStorage.removeItem(SESSION_STORAGE_KEY)
+    } catch {
+      // ignore
+    }
+    if (socketRef.current?.connected) {
+      socketRef.current.send({ type: 'logout' })
+    }
     targetRoomId.current = null
     userRef.current = null
     roomRef.current = null

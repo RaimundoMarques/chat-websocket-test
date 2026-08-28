@@ -10,16 +10,30 @@ Todas as mensagens (ida e volta) são **JSON** com o campo obrigatório `type`.
 
 ### `auth`
 
-Autentica o usuário no banco de dados com username e senha. Obrigatório antes de qualquer outra ação.
+Autentica o usuário no banco de dados com username e senha (ou restaura sessão com `user_id` e `session_token` em reloads de página). Obrigatório antes de qualquer outra ação.
 
 ```json
 {"type": "auth", "username": "admin", "password": "admin123"}
 ```
+ou restauração de sessão:
+```json
+{"type": "auth", "user_id": "a1b2c3d4", "session_token": "token_uuid"}
+```
 
 | Campo | Tipo | Obrigatório | Notas |
 |-------|------|-------------|-------|
-| `username` | string | sim | Nome de usuário cadastrado |
-| `password` | string | sim | Senha do usuário |
+| `username` | string | condicional | Nome de usuário cadastrado (ao logar com senha) |
+| `password` | string | condicional | Senha do usuário |
+| `user_id` | string | condicional | ID do usuário (ao restaurar sessão) |
+| `session_token` | string | condicional | Token ativo de sessão |
+
+### `logout`
+
+Encerra a sessão atual do usuário, limpando o token no banco de dados.
+
+```json
+{"type": "logout"}
+```
 
 ### `admin_create_user`
 

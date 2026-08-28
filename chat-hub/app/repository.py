@@ -125,6 +125,42 @@ async def authenticate_user(
         }, None
 
 
+async def authenticate_user_by_token(
+    user_id: str, session_token: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Autentica usuário pelo session_token gravado no banco de dados.
+    """
+    if not user_id or not session_token:
+        return None, "invalid_session"
+
+    async with db.pool().acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT u.id, u.username, u.profile,
+                   u.unit_id, un.name AS unit_name, u.session_token
+              FROM users u
+              LEFT JOIN units un ON un.id = u.unit_id
+             WHERE u.id = $1
+            """,
+            user_id.strip(),
+        )
+        if not row:
+            return None, "user_not_found"
+
+        if not row["session_token"] or row["session_token"] != session_token:
+            return None, "invalid_session"
+
+        return {
+            "user_id": row["id"],
+            "username": row["username"],
+            "profile": row["profile"],
+            "unit_id": row["unit_id"] or "ICCT",
+            "unit_name": row["unit_name"] or (row["unit_id"] or "ICCT"),
+            "session_token": session_token,
+        }, None
+
+
 async def create_user(
     username: str,
     password: str,

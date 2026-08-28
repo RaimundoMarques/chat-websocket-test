@@ -26,38 +26,58 @@ class HubState:
         return self.users_by_ws.get(websocket)
 
     async def authenticate(
-        self, websocket: Any, username: str, password: str = ""
+        self,
+        websocket: Any,
+        username: str = "",
+        password: str = "",
+        session_token: str = "",
+        user_id: str = "",
     ) -> tuple[User | None, dict[str, Any]]:
-        username = (username or "").strip()
-        password = (password or "").strip()
-
-        if not username:
-            return None, P.error("invalid_username", "Please provide a username.")
-        if not password:
-            return None, P.error("invalid_password", "Please provide a password.")
-
-        new_session_token = str(uuid4())
-
-        if db.is_connected():
-            user_data, err = await repo.authenticate_user(
-                username, password, new_session_token
-            )
+        # 1. Autenticação por session_token existente (ex: reload/F5)
+        if session_token and user_id:
+            if not db.is_connected():
+                return None, P.error("db_offline", "Database is not connected.")
+            user_data, err = await repo.authenticate_user_by_token(user_id, session_token)
             if err or not user_data:
-                return None, P.error("invalid_credentials", "Invalid username or password.")
+                return None, P.error("invalid_session", "Session expired or invalid. Please sign in again.")
             user_id = user_data["user_id"]
             username = user_data["username"]
             profile = user_data["profile"]
             unit_id = user_data["unit_id"]
+            active_session_token = session_token
         else:
-            user_id = str(uuid4())[:8]
-            profile = "member"
-            unit_id = "ICCT"
+            # 2. Autenticação por usuário e senha
+            username = (username or "").strip()
+            password = (password or "").strip()
 
-        # Encerra qualquer sessão anterior ativa com este mesmo username (case-insensitive)
+            if not username:
+                return None, P.error("invalid_username", "Please provide a username.")
+            if not password:
+                return None, P.error("invalid_password", "Please provide a password.")
+
+            active_session_token = str(uuid4())
+
+            if db.is_connected():
+                user_data, err = await repo.authenticate_user(
+                    username, password, active_session_token
+                )
+                if err or not user_data:
+                    return None, P.error("invalid_credentials", "Invalid username or password.")
+                user_id = user_data["user_id"]
+                username = user_data["username"]
+                profile = user_data["profile"]
+                unit_id = user_data["unit_id"]
+            else:
+                user_id = str(uuid4())[:8]
+                profile = "member"
+                unit_id = "ICCT"
+
+        # Encerra qualquer sessão anterior ativa com este mesmo user_id / username (case-insensitive)
         old_sockets = [
             u.websocket
             for u in self.users_by_id.values()
-            if u.username.lower() == username.lower() and u.websocket != websocket
+            if (u.user_id == user_id or u.username.lower() == username.lower())
+            and u.websocket != websocket
         ]
 
         for old_ws in old_sockets:
@@ -87,7 +107,7 @@ class HubState:
             username=username,
             profile=profile,
             websocket=websocket,
-            session_token=new_session_token,
+            session_token=active_session_token,
             unit_id=unit_id,
         )
 
@@ -419,10 +439,6 @@ class HubState:
                 if db.is_connected():
                     await repo.remove_member(room.room_id, user.user_id)
         user.room_id = None
-
-        if db.is_connected():
-            await repo.clear_user_session(user.user_id, user.session_token)
-
         return user, room
 
     def room_members(self, room: Room) -> list[User]:
