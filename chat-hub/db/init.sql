@@ -16,17 +16,54 @@
 -- no startup (IF NOT EXISTS) via ensure_schema.
 -- =============================================================================
 
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE IF NOT EXISTS units (
     id          TEXT PRIMARY KEY,
-    username    TEXT NOT NULL UNIQUE,
-    profile     TEXT NOT NULL CHECK (profile IN ('host', 'member')),
-    session_token TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    name        TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Migração idempotente caso a coluna session_token ainda não exista em base já criada
+-- Perfis válidos:
+-- 'member': apenas membro (não pode virar host, não pode criar sala)
+-- 'host': apenas host (cria salas, tem acesso host)
+-- 'host_member': pode alternar livremente entre host e member
+-- 'admin': gerenciador do sistema (painel admin + todas permissões)
+CREATE TABLE IF NOT EXISTS users (
+    id              TEXT PRIMARY KEY,
+    username        TEXT NOT NULL UNIQUE,
+    password_hash   TEXT NOT NULL,
+    profile         TEXT NOT NULL CHECK (profile IN ('admin', 'host', 'member', 'host_member')),
+    unit_id         TEXT REFERENCES units(id) ON DELETE SET NULL,
+    session_token   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Migrações idempotentes para schemas existentes
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS unit_id TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS session_token TEXT;
+
+-- Migra dados de schemas anteriores se existia factory_id ou institution_id
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='factory_id') THEN
+        UPDATE users SET unit_id = factory_id WHERE unit_id IS NULL AND factory_id IS NOT NULL;
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='institution_id') THEN
+        UPDATE users SET unit_id = institution_id WHERE unit_id IS NULL AND institution_id IS NOT NULL;
+    END IF;
+EXCEPTION
+    WHEN OTHERS THEN NULL;
+END $$;
+
+-- Atualiza restrição de perfil para incluir 'host_member'
+DO $$
+BEGIN
+    ALTER TABLE users DROP CONSTRAINT IF EXISTS users_profile_check;
+    ALTER TABLE users ADD CONSTRAINT users_profile_check CHECK (profile IN ('admin', 'host', 'member', 'host_member'));
+EXCEPTION
+    WHEN OTHERS THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS rooms (
     id          TEXT PRIMARY KEY,

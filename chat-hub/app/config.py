@@ -11,10 +11,10 @@ HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8765"))
 
 # Perfis que podem criar salas
-ROOM_CREATOR_PROFILES = frozenset({"host"})
+ROOM_CREATOR_PROFILES = frozenset({"admin", "host", "host_member"})
 
 # Perfis válidos no sistema
-VALID_PROFILES = frozenset({"host", "member"})
+VALID_PROFILES = frozenset({"admin", "host", "member", "host_member"})
 
 # PostgreSQL
 POSTGRES_USER = os.getenv("POSTGRES_USER", "chathub")

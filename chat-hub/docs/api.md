@@ -10,16 +10,54 @@ Todas as mensagens (ida e volta) são **JSON** com o campo obrigatório `type`.
 
 ### `auth`
 
-Identifica o usuário na conexão. Obrigatório antes de qualquer outra ação.
+Autentica o usuário no banco de dados com username e senha. Obrigatório antes de qualquer outra ação.
 
 ```json
-{"type": "auth", "username": "Ana", "profile": "host"}
+{"type": "auth", "username": "admin", "password": "admin123"}
 ```
 
 | Campo | Tipo | Obrigatório | Notas |
 |-------|------|-------------|-------|
-| `username` | string | sim | Único entre usuários conectados |
-| `profile` | string | sim | `host` ou `member` |
+| `username` | string | sim | Nome de usuário cadastrado |
+| `password` | string | sim | Senha do usuário |
+
+### `admin_create_user`
+
+Permite ao administrador (`admin`) cadastrar novos usuários com unidade (UNIT) vinculada.
+
+```json
+{
+  "type": "admin_create_user",
+  "username": "carlos",
+  "password": "user123",
+  "profile": "member",
+  "unit_id": "F1"
+}
+```
+
+### `create_unit`
+
+Permite ao administrador (`admin`) criar novas unidades (ex: `ICCT`, `F1`, `F2`, `F3`).
+
+```json
+{
+  "type": "create_unit",
+  "id": "F3",
+  "name": "Fábrica 3 - Produção"
+}
+```
+
+### `admin_reset_password`
+
+Permite ao administrador redefinir a senha de um usuário.
+
+```json
+{
+  "type": "admin_reset_password",
+  "user_id": "a1b2c3d4",
+  "new_password": "newpassword123"
+}
+```
 
 ### `create_room`
 

@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { ChatSocket, getWsUrl } from './lib/ws'
-import type { ChatLine, KnownUser, Profile, Room, ServerMessage, User } from './types'
+import type { ChatLine, KnownUser, Profile, Room, ServerMessage, Unit, User } from './types'
 
 type Screen = 'login' | 'lobby' | 'room'
 type Status = 'idle' | 'connecting' | 'online' | 'offline' | 'error'
 type Theme = 'light' | 'dark'
+type LobbyTab = 'rooms' | 'admin'
 
 const THEME_STORAGE_KEY = 'chathub_theme'
 
@@ -32,12 +33,22 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('login')
   const [status, setStatus] = useState<Status>('idle')
   const [error, setError] = useState<string | null>(null)
+  const [successMsg, setSuccessMsg] = useState<string | null>(null)
   const [user, setUser] = useState<User | null>(null)
   const [rooms, setRooms] = useState<Room[]>([])
   const [room, setRoom] = useState<Room | null>(null)
   const [lines, setLines] = useState<ChatLine[]>([])
   const [username, setUsername] = useState('')
-  const [profile, setProfile] = useState<Profile>('member')
+  const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [showNewUserPassword, setShowNewUserPassword] = useState(false)
+  const [showResetPassword, setShowResetPassword] = useState(false)
+  const [lobbyTab, setLobbyTab] = useState<LobbyTab>('rooms')
+
+  // Organization entities (Units: ICCT, F1, F2...)
+  const [units, setUnits] = useState<Unit[]>([])
+
+  // Room Creation / Management
   const [roomName, setRoomName] = useState('')
   const [isPrivate, setIsPrivate] = useState(false)
   const [selectedAllowedUsers, setSelectedAllowedUsers] = useState<string[]>([])
@@ -47,8 +58,26 @@ export default function App() {
   const [inviteInput, setInviteInput] = useState('')
   const [draft, setDraft] = useState('')
 
+  // Admin Form States
+  const [newUnitId, setNewUnitId] = useState('')
+  const [newUnitName, setNewUnitName] = useState('')
+
+  const [newUserName, setNewUserName] = useState('')
+  const [newUserPassword, setNewUserPassword] = useState('')
+  const [newUserProfile, setNewUserProfile] = useState<Profile>('member')
+  const [newUserUnit, setNewUserUnit] = useState('ICCT')
+
+  const [resetPwdUserId, setResetPwdUserId] = useState<string | null>(null)
+  const [resetPwdValue, setResetPwdValue] = useState('')
+
+  // Modal de confirmação para alteração de Role de usuário
+  const [roleChangeModal, setRoleChangeModal] = useState<{
+    targetUser: KnownUser
+    newProfile: Profile
+  } | null>(null)
+
   const socketRef = useRef<ChatSocket | null>(null)
-  const pendingAuth = useRef<{ username: string; profile: Profile } | null>(null)
+  const pendingAuth = useRef<{ username: string; password: string } | null>(null)
   const targetRoomId = useRef<string | null>(null)
   const userRef = useRef<User | null>(null)
   const roomRef = useRef<Room | null>(null)
@@ -73,7 +102,11 @@ export default function App() {
   const filteredLobbyUsers = useMemo(() => {
     const q = userSearchQuery.trim().toLowerCase()
     if (!q) return otherKnownUsers
-    return otherKnownUsers.filter((u) => u.username.toLowerCase().includes(q))
+    return otherKnownUsers.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        (u.unit_id && u.unit_id.toLowerCase().includes(q)),
+    )
   }, [otherKnownUsers, userSearchQuery])
 
   const availableToInvite = useMemo(() => {
@@ -94,7 +127,11 @@ export default function App() {
   const filteredManageUsers = useMemo(() => {
     const q = manageUserSearchQuery.trim().toLowerCase()
     if (!q) return availableToInvite
-    return availableToInvite.filter((u) => u.username.toLowerCase().includes(q))
+    return availableToInvite.filter(
+      (u) =>
+        u.username.toLowerCase().includes(q) ||
+        (u.unit_id && u.unit_id.toLowerCase().includes(q)),
+    )
   }, [availableToInvite, manageUserSearchQuery])
 
   useEffect(() => {
@@ -132,7 +169,6 @@ export default function App() {
       case 'profile_changed':
         setUser(msg.user)
         userRef.current = msg.user
-        setProfile(msg.user.profile)
         setError(null)
         break
 
@@ -142,6 +178,35 @@ export default function App() {
 
       case 'users_list':
         setKnownUsers(msg.users)
+        break
+
+      case 'units_list':
+        setUnits(msg.units)
+        if (msg.units.length > 0 && !newUserUnit) {
+          setNewUserUnit(msg.units[0].id)
+        }
+        break
+
+      case 'unit_created':
+        setSuccessMsg(`Unit '${msg.unit.id} - ${msg.unit.name}' created successfully!`)
+        setTimeout(() => setSuccessMsg(null), 4000)
+        break
+
+      case 'user_created':
+        setSuccessMsg(`User '${msg.user.username}' created successfully!`)
+        setTimeout(() => setSuccessMsg(null), 4000)
+        break
+
+      case 'user_updated':
+        setSuccessMsg('User permissions updated successfully!')
+        setTimeout(() => setSuccessMsg(null), 4000)
+        break
+
+      case 'password_reset':
+        setSuccessMsg('User password was successfully reset!')
+        setResetPwdUserId(null)
+        setResetPwdValue('')
+        setTimeout(() => setSuccessMsg(null), 4000)
         break
 
       case 'room_created':
@@ -265,7 +330,7 @@ export default function App() {
           socket.send({
             type: 'auth',
             username: pending.username,
-            profile: pending.profile,
+            password: pending.password,
           })
           pendingAuth.current = null
         } else {
@@ -289,7 +354,7 @@ export default function App() {
       },
       onError: () => {
         setStatus('error')
-        setError('Unable to connect to chatHub.')
+        setError('Unable to connect to chatHub backend.')
       },
       onMessage: (msg) => handleMessageRef.current(msg),
     })
@@ -298,13 +363,13 @@ export default function App() {
     return socket
   }
 
-  function connectWith(name: string, prof: Profile) {
+  function connectWith(name: string, pass: string) {
     setError(null)
     setStatus('connecting')
-    pendingAuth.current = { username: name, profile: prof }
+    pendingAuth.current = { username: name, password: pass }
     const socket = ensureSocket()
     if (socket.connected) {
-      socket.send({ type: 'auth', username: name, profile: prof })
+      socket.send({ type: 'auth', username: name, password: pass })
       pendingAuth.current = null
     } else {
       socket.connect(wsUrl)
@@ -321,11 +386,16 @@ export default function App() {
   function onLogin(e: FormEvent) {
     e.preventDefault()
     const name = username.trim()
+    const pass = password.trim()
     if (!name) {
-      setError('Please enter a username.')
+      setError('Please enter your username.')
       return
     }
-    connectWith(name, profile)
+    if (!pass) {
+      setError('Please enter your password.')
+      return
+    }
+    connectWith(name, pass)
   }
 
   function logout() {
@@ -345,6 +415,8 @@ export default function App() {
     setScreen('login')
     setStatus('idle')
     setError(null)
+    setSuccessMsg(null)
+    setPassword('')
   }
 
   function toggleAllowedUser(targetName: string) {
@@ -416,8 +488,8 @@ export default function App() {
     socketRef.current?.send({ type: 'join_room', room_id: roomId })
   }
 
-  function switchProfile(next: Profile) {
-    if (!user || user.profile === next) return
+  function switchProfile(next: 'host' | 'member') {
+    if (!user || user.active_role === next) return
     socketRef.current?.send({ type: 'change_profile', profile: next })
   }
 
@@ -431,6 +503,78 @@ export default function App() {
     if (!text) return
     socketRef.current?.send({ type: 'chat', text })
     setDraft('')
+  }
+
+  // Admin Actions
+  function handleCreateUnit(e: FormEvent) {
+    e.preventDefault()
+    if (!newUnitId.trim() || !newUnitName.trim()) {
+      setError('Please provide unit code and name.')
+      return
+    }
+    socketRef.current?.send({
+      type: 'create_unit',
+      id: newUnitId.trim(),
+      name: newUnitName.trim(),
+    })
+    setNewUnitId('')
+    setNewUnitName('')
+  }
+
+  function handleCreateUser(e: FormEvent) {
+    e.preventDefault()
+    if (!newUserName.trim() || !newUserPassword.trim()) {
+      setError('Please enter username and password for the new user.')
+      return
+    }
+    socketRef.current?.send({
+      type: 'admin_create_user',
+      username: newUserName.trim(),
+      password: newUserPassword.trim(),
+      profile: newUserProfile,
+      unit_id: newUserUnit,
+    })
+    setNewUserName('')
+    setNewUserPassword('')
+  }
+
+  function handleResetPassword(e: FormEvent) {
+    e.preventDefault()
+    if (!resetPwdUserId || !resetPwdValue.trim()) {
+      setError('Please enter the new password.')
+      return
+    }
+    socketRef.current?.send({
+      type: 'admin_reset_password',
+      user_id: resetPwdUserId,
+      new_password: resetPwdValue.trim(),
+    })
+  }
+
+  function requestUpdateUserRole(targetUser: KnownUser, newProfile: Profile) {
+    if (targetUser.profile === newProfile) return
+    setRoleChangeModal({ targetUser, newProfile })
+  }
+
+  function confirmUpdateUserRole() {
+    if (!roleChangeModal) return
+    const { targetUser, newProfile } = roleChangeModal
+    socketRef.current?.send({
+      type: 'admin_update_user',
+      user_id: targetUser.user_id,
+      profile: newProfile,
+      unit_id: targetUser.unit_id || 'ICCT',
+    })
+    setRoleChangeModal(null)
+  }
+
+  function handleUpdateUserUnit(targetUser: KnownUser, newUnitId: string) {
+    socketRef.current?.send({
+      type: 'admin_update_user',
+      user_id: targetUser.user_id,
+      profile: targetUser.profile,
+      unit_id: newUnitId,
+    })
   }
 
   return (
@@ -504,47 +648,81 @@ export default function App() {
 
       <main className="shell">
         {error && <p className="banner">{error}</p>}
+        {successMsg && <p className="banner banner-success">{successMsg}</p>}
 
         {screen === 'login' && (
           <section className="panel login-panel">
-            <h1>Join the Hub</h1>
+            <h1>Sign in to chatHub</h1>
             <p className="lead">
-              Enter a username and connect to view rooms. Only authenticated users
-              can enter. Hosts create rooms; members join and chat.
+              Enter your registered username and password. Users belong to a system unit (e.g.{' '}
+              <strong>ICCT</strong>, <strong>F1</strong>, <strong>F2</strong>).
             </p>
             <form className="stack" onSubmit={onLogin}>
               <label>
                 Username
                 <input
+                  type="text"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  placeholder="e.g. Alice"
+                  placeholder="e.g. admin or ian"
                   autoFocus
+                  required
                 />
               </label>
-              <fieldset className="profiles">
-                <legend>Role</legend>
-                <label className={profile === 'host' ? 'chip active' : 'chip'}>
+              <label>
+                Password
+                <div className="password-input-wrapper">
                   <input
-                    type="radio"
-                    name="profile"
-                    checked={profile === 'host'}
-                    onChange={() => setProfile('host')}
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="••••••••"
+                    required
                   />
-                  host
-                </label>
-                <label className={profile === 'member' ? 'chip active' : 'chip'}>
-                  <input
-                    type="radio"
-                    name="profile"
-                    checked={profile === 'member'}
-                    onChange={() => setProfile('member')}
-                  />
-                  member
-                </label>
-              </fieldset>
+                  <button
+                    type="button"
+                    className="toggle-password-btn"
+                    onClick={() => setShowPassword((prev) => !prev)}
+                    title={showPassword ? 'Hide password' : 'Show password'}
+                    aria-label={showPassword ? 'Hide password' : 'Show password'}
+                  >
+                    {showPassword ? (
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                        <line x1="1" y1="1" x2="23" y2="23" />
+                      </svg>
+                    ) : (
+                      <svg
+                        width="16"
+                        height="16"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </label>
+
               <button type="submit" disabled={status === 'connecting'}>
-                {status === 'connecting' ? 'Connecting…' : 'Connect'}
+                {status === 'connecting' ? 'Verifying credentials…' : 'Sign In'}
               </button>
             </form>
             <p className="hint">WS: {wsUrl}</p>
@@ -555,163 +733,545 @@ export default function App() {
           <section className="panel lobby-panel">
             <div className="panel-head">
               <div>
-                <h1>Rooms</h1>
-                <p className="lead">
-                  Hello, <strong>{user.username}</strong>
-                  <span className="profile-badge">{user.profile}</span>
-                </p>
+                <h1>Lobby</h1>
+                <div className="user-profile-summary">
+                  <span>Logged in as: <strong>{user.username}</strong></span>
+                  <span className={`profile-badge profile-${user.profile}`}>
+                    {user.profile === 'host_member' ? 'host & member' : user.profile}
+                  </span>
+                  <span className="meta-tag org-tag">🏢 UNIT: {user.unit_id || 'ICCT'}</span>
+                </div>
               </div>
+
+              {user.profile === 'admin' && (
+                <div className="tab-nav">
+                  <button
+                    type="button"
+                    className={`tab-btn ${lobbyTab === 'rooms' ? 'active' : ''}`}
+                    onClick={() => setLobbyTab('rooms')}
+                  >
+                    💬 Chat Rooms
+                  </button>
+                  <button
+                    type="button"
+                    className={`tab-btn ${lobbyTab === 'admin' ? 'active' : ''}`}
+                    onClick={() => setLobbyTab('admin')}
+                  >
+                    ⚙️ Administration
+                  </button>
+                </div>
+              )}
             </div>
 
-            <fieldset className="profiles lobby-profiles">
-              <legend>Switch role</legend>
-              <div className="profile-options">
-                <label className={user.profile === 'host' ? 'chip active' : 'chip'}>
-                  <input
-                    type="radio"
-                    name="lobby-profile"
-                    checked={user.profile === 'host'}
-                    onChange={() => switchProfile('host')}
-                  />
-                  host
-                </label>
-                <label className={user.profile === 'member' ? 'chip active' : 'chip'}>
-                  <input
-                    type="radio"
-                    name="lobby-profile"
-                    checked={user.profile === 'member'}
-                    onChange={() => switchProfile('member')}
-                  />
-                  member
-                </label>
-              </div>
-            </fieldset>
-
-            {user.profile === 'host' && (
-              <form className="create-room-form" onSubmit={createRoom}>
-                <div className="inline-form">
-                  <input
-                    value={roomName}
-                    onChange={(e) => setRoomName(e.target.value)}
-                    placeholder="New room name"
-                  />
-                  <button type="submit">Create room</button>
-                </div>
-                <div className="privacy-options">
-                  <label className="checkbox-label">
+            {user.profile === 'host_member' && (
+              <fieldset className="profiles lobby-profiles">
+                <legend>Active role</legend>
+                <div className="profile-options">
+                  <label className={(user.active_role || 'host') === 'host' ? 'chip active' : 'chip'}>
                     <input
-                      type="checkbox"
-                      checked={isPrivate}
-                      onChange={(e) => {
-                        setIsPrivate(e.target.checked)
-                        if (!e.target.checked) {
-                          setSelectedAllowedUsers([])
-                        }
-                      }}
+                      type="radio"
+                      name="lobby-profile"
+                      checked={(user.active_role || 'host') === 'host'}
+                      onChange={() => switchProfile('host')}
                     />
-                    <span>Private / Reserved Room 🔒</span>
+                    host
                   </label>
-                  {isPrivate && (
-                    <div className="privacy-config-box">
-                      {otherKnownUsers.length > 0 ? (
-                        <div className="user-picker">
-                          <div className="picker-header">
-                            <span className="picker-title">
-                              Select existing users ({otherKnownUsers.length} total · {otherKnownUsers.filter((u) => u.is_online).length} online):
-                            </span>
-                            <div className="picker-actions">
-                              {otherKnownUsers.some((u) => u.is_online) && (
-                                <button
-                                  type="button"
-                                  className="btn-tiny"
-                                  onClick={selectAllOnline}
-                                  title="Select all online users"
-                                >
-                                  + All Online
-                                </button>
-                              )}
-                              {selectedAllowedUsers.length > 0 && (
-                                <button
-                                  type="button"
-                                  className="btn-tiny ghost"
-                                  onClick={clearSelectedUsers}
-                                  title="Clear selected users"
-                                >
-                                  Clear
-                                </button>
-                              )}
-                            </div>
-                          </div>
+                  <label className={(user.active_role || 'host') === 'member' ? 'chip active' : 'chip'}>
+                    <input
+                      type="radio"
+                      name="lobby-profile"
+                      checked={(user.active_role || 'host') === 'member'}
+                      onChange={() => switchProfile('member')}
+                    />
+                    member
+                  </label>
+                </div>
+              </fieldset>
+            )}
 
-                          {otherKnownUsers.length > 4 && (
-                            <input
-                              type="text"
-                              className="search-filter-input"
-                              value={userSearchQuery}
-                              onChange={(e) => setUserSearchQuery(e.target.value)}
-                              placeholder="🔍 Filter users by name..."
-                            />
+            {lobbyTab === 'rooms' && (
+              <>
+                {(user.profile === 'admin' || user.profile === 'host' || (user.profile === 'host_member' && (user.active_role || 'host') === 'host')) && (
+                  <form className="create-room-form" onSubmit={createRoom}>
+                    <div className="inline-form">
+                      <input
+                        value={roomName}
+                        onChange={(e) => setRoomName(e.target.value)}
+                        placeholder="New room name"
+                      />
+                      <button type="submit">Create room</button>
+                    </div>
+                    <div className="privacy-options">
+                      <label className="checkbox-label">
+                        <input
+                          type="checkbox"
+                          checked={isPrivate}
+                          onChange={(e) => {
+                            setIsPrivate(e.target.checked)
+                            if (!e.target.checked) {
+                              setSelectedAllowedUsers([])
+                            }
+                          }}
+                        />
+                        <span>Private / Reserved Room 🔒</span>
+                      </label>
+                      {isPrivate && (
+                        <div className="privacy-config-box">
+                          {otherKnownUsers.length > 0 ? (
+                            <div className="user-picker">
+                              <div className="picker-header">
+                                <span className="picker-title">
+                                  Select existing users ({otherKnownUsers.length} total ·{' '}
+                                  {otherKnownUsers.filter((u) => u.is_online).length} online):
+                                </span>
+                                <div className="picker-actions">
+                                  {otherKnownUsers.some((u) => u.is_online) && (
+                                    <button
+                                      type="button"
+                                      className="btn-tiny"
+                                      onClick={selectAllOnline}
+                                      title="Select all online users"
+                                    >
+                                      + All Online
+                                    </button>
+                                  )}
+                                  {selectedAllowedUsers.length > 0 && (
+                                    <button
+                                      type="button"
+                                      className="btn-tiny ghost"
+                                      onClick={clearSelectedUsers}
+                                      title="Clear selected users"
+                                    >
+                                      Clear
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              {otherKnownUsers.length > 4 && (
+                                <input
+                                  type="text"
+                                  className="search-filter-input"
+                                  value={userSearchQuery}
+                                  onChange={(e) => setUserSearchQuery(e.target.value)}
+                                  placeholder="🔍 Filter users by name or factory..."
+                                />
+                              )}
+
+                              <div className="picker-scroll-container">
+                                <div className="picker-chips">
+                                  {filteredLobbyUsers.map((u) => {
+                                    const isSelected = selectedAllowedUsers.includes(u.username)
+                                    return (
+                                      <button
+                                        type="button"
+                                        key={u.user_id || u.username}
+                                        className={`picker-chip ${isSelected ? 'active' : ''}`}
+                                        onClick={() => toggleAllowedUser(u.username)}
+                                        title={`${u.username} (${u.unit_id || 'ICCT'}) - ${
+                                          u.is_online ? 'online' : 'offline'
+                                        }`}
+                                      >
+                                        <span
+                                          className={`status-indicator ${
+                                            u.is_online ? 'online' : 'offline'
+                                          }`}
+                                        />
+                                        <span className="user-name">{u.username}</span>
+                                        <span className="chip-unit">[{u.unit_id || 'ICCT'}]</span>
+                                        <span className="chip-badge">{isSelected ? '✓' : '+'}</span>
+                                      </button>
+                                    )
+                                  })}
+                                  {filteredLobbyUsers.length === 0 && (
+                                    <span className="no-matches">
+                                      No users matching "{userSearchQuery}"
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <span className="no-matches">No other registered users yet.</span>
                           )}
-
-                          <div className="picker-scroll-container">
-                            <div className="picker-chips">
-                              {filteredLobbyUsers.map((u) => {
-                                const isSelected = selectedAllowedUsers.includes(u.username)
-                                return (
-                                  <button
-                                    type="button"
-                                    key={u.user_id || u.username}
-                                    className={`picker-chip ${isSelected ? 'active' : ''}`}
-                                    onClick={() => toggleAllowedUser(u.username)}
-                                    title={`${u.username} (${u.is_online ? 'online' : 'offline'})`}
-                                  >
-                                    <span className={`status-indicator ${u.is_online ? 'online' : 'offline'}`} />
-                                    <span className="user-name">{u.username}</span>
-                                    <span className="chip-badge">{isSelected ? '✓' : '+'}</span>
-                                  </button>
-                                )
-                              })}
-                              {filteredLobbyUsers.length === 0 && (
-                                <span className="no-matches">No users matching "{userSearchQuery}"</span>
-                              )}
+                          {selectedAllowedUsers.length > 0 && (
+                            <div className="selected-summary">
+                              Selected users ({selectedAllowedUsers.length}):{' '}
+                              <strong>{selectedAllowedUsers.join(', ')}</strong>
                             </div>
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="no-matches">No other registered users yet.</span>
-                      )}
-                      {selectedAllowedUsers.length > 0 && (
-                        <div className="selected-summary">
-                          Selected users ({selectedAllowedUsers.length}): <strong>{selectedAllowedUsers.join(', ')}</strong>
+                          )}
                         </div>
                       )}
                     </div>
+                  </form>
+                )}
+
+                <h2 className="section-title">Available Rooms</h2>
+                <ul className="room-list">
+                  {rooms.length === 0 && (
+                    <li className="empty">No open rooms. Create one above to get started.</li>
                   )}
-                </div>
-              </form>
+                  {rooms.map((r) => (
+                    <li key={r.room_id}>
+                      <div>
+                        <strong className="room-title">
+                          {r.name}
+                          {r.is_private && (
+                            <span className="private-badge" title="Reserved / Private room">
+                              🔒 Private
+                            </span>
+                          )}
+                        </strong>
+                        <span>
+                          {r.member_count} online · Room ID: {r.room_id}
+                        </span>
+                      </div>
+                      <button type="button" onClick={() => joinRoom(r.room_id)}>
+                        Join
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </>
             )}
 
-            <ul className="room-list">
-              {rooms.length === 0 && (
-                <li className="empty">No open rooms. Wait for a host to create one.</li>
-              )}
-              {rooms.map((r) => (
-                <li key={r.room_id}>
-                  <div>
-                    <strong className="room-title">
-                      {r.name}
-                      {r.is_private && <span className="private-badge" title="Reserved / Private room">🔒 Private</span>}
-                    </strong>
-                    <span>
-                      {r.member_count} online · {r.room_id}
-                    </span>
+            {lobbyTab === 'admin' && user.profile === 'admin' && (
+              <div className="admin-dashboard">
+                <div className="admin-grid">
+                  {/* Create User Card */}
+                  <div className="admin-card">
+                    <h3>➕ Create System User</h3>
+                    <form className="admin-form" onSubmit={handleCreateUser}>
+                      <label>
+                        Username
+                        <input
+                          type="text"
+                          value={newUserName}
+                          onChange={(e) => setNewUserName(e.target.value)}
+                          placeholder="e.g. carlos"
+                          required
+                        />
+                      </label>
+                      <label>
+                        Password
+                        <div className="password-input-wrapper">
+                          <input
+                            type={showNewUserPassword ? 'text' : 'password'}
+                            value={newUserPassword}
+                            onChange={(e) => setNewUserPassword(e.target.value)}
+                            placeholder="e.g. secret123"
+                            required
+                          />
+                          <button
+                            type="button"
+                            className="toggle-password-btn"
+                            onClick={() => setShowNewUserPassword((prev) => !prev)}
+                            title={showNewUserPassword ? 'Hide password' : 'Show password'}
+                            aria-label={showNewUserPassword ? 'Hide password' : 'Show password'}
+                          >
+                            {showNewUserPassword ? (
+                              <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                                <line x1="1" y1="1" x2="23" y2="23" />
+                              </svg>
+                            ) : (
+                              <svg
+                                width="15"
+                                height="15"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                <circle cx="12" cy="12" r="3" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
+                      </label>
+                      <div className="form-row">
+                        <label>
+                          Role
+                          <select
+                            value={newUserProfile}
+                            onChange={(e) => setNewUserProfile(e.target.value as Profile)}
+                          >
+                            <option value="member">Member only</option>
+                            <option value="host">Host only</option>
+                            <option value="host_member">Host & Member</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </label>
+                        <label>
+                          Unit
+                          <select
+                            value={newUserUnit}
+                            onChange={(e) => setNewUserUnit(e.target.value)}
+                          >
+                            {units.map((un) => (
+                              <option key={un.id} value={un.id}>
+                                {un.id} - {un.name}
+                              </option>
+                            ))}
+                            {units.length === 0 && (
+                              <>
+                                <option value="ICCT">ICCT - Instituto ICCT</option>
+                                <option value="F1">F1 - Fábrica F1</option>
+                                <option value="F2">F2 - Fábrica F2</option>
+                              </>
+                            )}
+                          </select>
+                        </label>
+                      </div>
+                      <button type="submit">Create User</button>
+                    </form>
                   </div>
-                  <button type="button" onClick={() => joinRoom(r.room_id)}>
-                    Join
-                  </button>
-                </li>
-              ))}
-            </ul>
+
+                  {/* Create Unit Card */}
+                  <div className="admin-card">
+                    <h3>🏢 Create New Unit</h3>
+                    <form className="admin-form" onSubmit={handleCreateUnit}>
+                      <label>
+                        Unit Code / ID
+                        <input
+                          type="text"
+                          value={newUnitId}
+                          onChange={(e) => setNewUnitId(e.target.value)}
+                          placeholder="e.g. F3 or LAB or MATRIZ"
+                          required
+                        />
+                      </label>
+                      <label>
+                        Unit Name
+                        <input
+                          type="text"
+                          value={newUnitName}
+                          onChange={(e) => setNewUnitName(e.target.value)}
+                          placeholder="e.g. Fábrica 3"
+                          required
+                        />
+                      </label>
+                      <button type="submit">Register Unit</button>
+                    </form>
+                  </div>
+                </div>
+
+                {/* Modal de Confirmação para Alteração de Role */}
+                {roleChangeModal && (
+                  <div className="modal-backdrop">
+                    <div className="modal-card">
+                      <h3>⚠️ Confirm Role Change</h3>
+                      <p>
+                        Are you sure you want to change role for user{' '}
+                        <strong>{roleChangeModal.targetUser.username}</strong> from{' '}
+                        <span className="role-chip old-role">{roleChangeModal.targetUser.profile}</span> to{' '}
+                        <span className="role-chip new-role">{roleChangeModal.newProfile}</span>?
+                      </p>
+                      <div className="modal-actions">
+                        <button type="button" onClick={confirmUpdateUserRole}>
+                          Confirm Change
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => setRoleChangeModal(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Password Reset Modal / Panel */}
+                {resetPwdUserId && (
+                  <div className="modal-backdrop">
+                    <div className="modal-card">
+                      <h3>🔑 Reset Password</h3>
+                      <p>
+                        Resetting password for user:{' '}
+                        <strong>
+                          {knownUsers.find((u) => u.user_id === resetPwdUserId)?.username}
+                        </strong>
+                      </p>
+                      <form onSubmit={handleResetPassword}>
+                        <label>
+                          New Password:
+                          <div className="password-input-wrapper">
+                            <input
+                              type={showResetPassword ? 'text' : 'password'}
+                              value={resetPwdValue}
+                              onChange={(e) => setResetPwdValue(e.target.value)}
+                              placeholder="Enter new password..."
+                              autoFocus
+                              required
+                            />
+                            <button
+                              type="button"
+                              className="toggle-password-btn"
+                              onClick={() => setShowResetPassword((prev) => !prev)}
+                              title={showResetPassword ? 'Hide password' : 'Show password'}
+                              aria-label={showResetPassword ? 'Hide password' : 'Show password'}
+                            >
+                              {showResetPassword ? (
+                                <svg
+                                  width="15"
+                                  height="15"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                                  <line x1="1" y1="1" x2="23" y2="23" />
+                                </svg>
+                              ) : (
+                                <svg
+                                  width="15"
+                                  height="15"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  aria-hidden="true"
+                                >
+                                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                  <circle cx="12" cy="12" r="3" />
+                                </svg>
+                              )}
+                            </button>
+                          </div>
+                        </label>
+                        <div className="modal-actions">
+                          <button type="submit">Save Password</button>
+                          <button
+                            type="button"
+                            className="ghost"
+                            onClick={() => {
+                              setResetPwdUserId(null)
+                              setResetPwdValue('')
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </form>
+                    </div>
+                  </div>
+                )}
+
+                {/* Registered Users Table */}
+                <div className="admin-section">
+                  <h3>👥 Registered System Users ({knownUsers.length})</h3>
+                  <div className="admin-table-container">
+                    <table className="admin-table">
+                      <thead>
+                        <tr>
+                          <th>Status</th>
+                          <th>Username</th>
+                          <th>Role</th>
+                          <th>UNIT</th>
+                          <th>Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {knownUsers.map((u) => (
+                          <tr key={u.user_id}>
+                            <td>
+                              <span className={`status-pill ${u.is_online ? 'online' : 'offline'}`}>
+                                {u.is_online ? 'Online' : 'Offline'}
+                              </span>
+                            </td>
+                            <td>
+                              <strong>{u.username}</strong>
+                            </td>
+                            <td>
+                              <select
+                                className="table-select"
+                                value={u.profile}
+                                onChange={(e) =>
+                                  requestUpdateUserRole(u, e.target.value as Profile)
+                                }
+                              >
+                                <option value="member">member</option>
+                                <option value="host">host</option>
+                                <option value="host_member">host & member</option>
+                                <option value="admin">admin</option>
+                              </select>
+                            </td>
+                            <td>
+                              <select
+                                className="table-select"
+                                value={u.unit_id || 'ICCT'}
+                                onChange={(e) => handleUpdateUserUnit(u, e.target.value)}
+                              >
+                                {units.map((un) => (
+                                  <option key={un.id} value={un.id}>
+                                    {un.id}
+                                  </option>
+                                ))}
+                                {units.length === 0 && (
+                                  <>
+                                    <option value="ICCT">ICCT</option>
+                                    <option value="F1">F1</option>
+                                    <option value="F2">F2</option>
+                                  </>
+                                )}
+                              </select>
+                            </td>
+                            <td>
+                              <button
+                                type="button"
+                                className="btn-tiny"
+                                onClick={() => setResetPwdUserId(u.user_id)}
+                                title="Reset user password"
+                              >
+                                🔑 Reset Pwd
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Units Directory */}
+                <div className="admin-section">
+                  <h3>🏢 System Units ({units.length})</h3>
+                  <div className="factories-grid">
+                    {units.map((un) => (
+                      <div key={un.id} className="factory-chip-card">
+                        <span className="factory-code">{un.id}</span>
+                        <div>
+                          <strong>{un.name}</strong>
+                          <p className="subtext">Unit Code: {un.id}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
@@ -724,7 +1284,7 @@ export default function App() {
                   {room.is_private && <span className="private-badge">🔒 Private</span>}
                 </h1>
                 <p className="lead">
-                  {room.member_count} online · {user.username}
+                  {room.member_count} online · {user.username} [{user.unit_id || 'ICCT'}]
                 </p>
               </div>
               <button type="button" className="ghost" onClick={leaveRoom}>
@@ -732,7 +1292,7 @@ export default function App() {
               </button>
             </div>
 
-            {room.is_private && room.created_by === user.user_id && (
+            {room.is_private && (room.created_by === user.user_id || user.profile === 'admin') && (
               <div className="management-box">
                 <header className="management-head">
                   <strong>Manage Allowed Users 🔒</strong>
@@ -772,15 +1332,22 @@ export default function App() {
                             key={u.user_id || u.username}
                             className="picker-chip"
                             onClick={() => quickInvite(u.username)}
-                            title={`Grant access to ${u.username} (${u.is_online ? 'online' : 'offline'})`}
+                            title={`Grant access to ${u.username} (${u.unit_id || 'ICCT'}) - ${
+                              u.is_online ? 'online' : 'offline'
+                            }`}
                           >
-                            <span className={`status-indicator ${u.is_online ? 'online' : 'offline'}`} />
+                            <span
+                              className={`status-indicator ${u.is_online ? 'online' : 'offline'}`}
+                            />
                             <span className="user-name">{u.username}</span>
+                            <span className="chip-unit">[{u.unit_id || 'ICCT'}]</span>
                             <span className="chip-badge">+</span>
                           </button>
                         ))}
                         {filteredManageUsers.length === 0 && (
-                          <span className="no-matches">No users matching "{manageUserSearchQuery}"</span>
+                          <span className="no-matches">
+                            No users matching "{manageUserSearchQuery}"
+                          </span>
                         )}
                       </div>
                     </div>

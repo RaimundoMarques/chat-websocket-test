@@ -18,11 +18,11 @@ def parse_cmd(line: str) -> dict | None:
         cmd = parts[0].lower()
 
         if cmd == "/auth":
-            # /auth nome perfil
+            # /auth nome senha
             if len(parts) < 3:
-                print("Uso: /auth <username> <host|member>")
+                print("Uso: /auth <username> <password>")
                 return None
-            return {"type": "auth", "username": parts[1], "profile": parts[2]}
+            return {"type": "auth", "username": parts[1], "password": parts[2]}
 
         if cmd == "/create":
             name = parts[1] if len(parts) > 1 else ""

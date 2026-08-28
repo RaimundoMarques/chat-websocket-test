@@ -80,6 +80,17 @@ async def _broadcast_users_list(state: HubState) -> None:
             pass
 
 
+async def _broadcast_units_list(state: HubState) -> None:
+    """Atualiza a lista de unidades para todos os clientes."""
+    payload = await state.list_units()
+    raw = json.dumps(payload, ensure_ascii=False)
+    for user in state.users_by_id.values():
+        try:
+            await user.websocket.send(raw)
+        except (OSError, RuntimeError):
+            pass
+
+
 class ConnectionHandler:
     def __init__(self, state: HubState) -> None:
         self.state = state
@@ -141,12 +152,13 @@ class ConnectionHandler:
             user, response = await self.state.authenticate(
                 websocket,
                 data.get("username", ""),
-                data.get("profile", "member"),
+                data.get("password", ""),
             )
             await _send(websocket, response)
             if user and response.get("type") == P.AUTH_OK:
                 await _send(websocket, await self.state.list_rooms())
                 await _send(websocket, await self.state.list_users())
+                await _send(websocket, await self.state.list_units())
                 await _broadcast_users_list(self.state)
             return
 
@@ -246,6 +258,55 @@ class ConnectionHandler:
 
         if msg_type == P.LIST_USERS:
             await _send(websocket, await self.state.list_users())
+            return
+
+        if msg_type == P.LIST_UNITS:
+            await _send(websocket, await self.state.list_units())
+            return
+
+        if msg_type == P.CREATE_UNIT:
+            unit_data, response = await self.state.create_unit_admin(
+                user,
+                data.get("id", ""),
+                data.get("name", ""),
+            )
+            await _send(websocket, response)
+            if response.get("type") == P.UNIT_CREATED:
+                await _broadcast_units_list(self.state)
+            return
+
+        if msg_type == P.ADMIN_CREATE_USER:
+            user_data, response = await self.state.create_user_admin(
+                user,
+                username=data.get("username", ""),
+                password=data.get("password", ""),
+                profile=data.get("profile", "member"),
+                unit_id=data.get("unit_id", "ICCT"),
+            )
+            await _send(websocket, response)
+            if response.get("type") == P.USER_CREATED:
+                await _broadcast_users_list(self.state)
+            return
+
+        if msg_type == P.ADMIN_UPDATE_USER:
+            ok_up, response = await self.state.update_user_admin(
+                user,
+                user_id=data.get("user_id", ""),
+                profile=data.get("profile", "member"),
+                unit_id=data.get("unit_id", "ICCT"),
+            )
+            await _send(websocket, response)
+            if response.get("type") == P.USER_UPDATED:
+                await _broadcast_users_list(self.state)
+            return
+
+        if msg_type == P.ADMIN_RESET_PASSWORD:
+            ok_reset, response = await self.state.reset_password_admin(
+                user,
+                user_id=data.get("user_id", ""),
+                new_password=data.get("new_password", ""),
+            )
+            await _send(websocket, response)
             return
 
         if msg_type == P.CHANGE_PROFILE:

@@ -7,15 +7,17 @@ import asyncio
 import websockets
 
 from app import db
+from app import repository as repo
 from app.config import DATABASE_URL, HOST, PORT
 from app.handler import ConnectionHandler
 from app.hub import HubState
 
 
 async def main() -> None:
-    print(f"Conectando ao PostgreSQL...", flush=True)
+    print("Conectando ao PostgreSQL...", flush=True)
     await db.connect()
     await db.ensure_schema()
+    await repo.ensure_seed_data()
     await db.reset_live_memberships()
 
     state = HubState()
