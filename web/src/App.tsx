@@ -4,6 +4,63 @@ import type { ChatLine, Profile, Room, ServerMessage, User } from './types'
 
 type Screen = 'login' | 'lobby' | 'room'
 type Status = 'idle' | 'connecting' | 'online' | 'offline' | 'error'
+type Theme = 'light' | 'dark'
+
+interface SessionData {
+  username: string
+  profile: Profile
+  roomId: string | null
+}
+
+const SESSION_STORAGE_KEY = 'chathub_session'
+const THEME_STORAGE_KEY = 'chathub_theme'
+
+function getInitialTheme(): Theme {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY)
+    if (saved === 'dark' || saved === 'light') return saved
+    if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      return 'dark'
+    }
+  } catch {
+    // ignore
+  }
+  return 'light'
+}
+
+function loadSavedSession(): SessionData | null {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<SessionData>
+    if (
+      typeof parsed.username === 'string' &&
+      parsed.username.trim() &&
+      (parsed.profile === 'host' || parsed.profile === 'member')
+    ) {
+      return {
+        username: parsed.username.trim(),
+        profile: parsed.profile,
+        roomId: typeof parsed.roomId === 'string' ? parsed.roomId : null,
+      }
+    }
+  } catch {
+    // ignore parsing errors
+  }
+  return null
+}
+
+function saveSession(data: SessionData | null) {
+  try {
+    if (data) {
+      localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data))
+    } else {
+      localStorage.removeItem(SESSION_STORAGE_KEY)
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
 
 let lineSeq = 0
 function nextId() {
@@ -12,6 +69,7 @@ function nextId() {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
   const [screen, setScreen] = useState<Screen>('login')
   const [status, setStatus] = useState<Status>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -26,78 +84,89 @@ export default function App() {
 
   const socketRef = useRef<ChatSocket | null>(null)
   const pendingAuth = useRef<{ username: string; profile: Profile } | null>(null)
+  const targetRoomId = useRef<string | null>(null)
+  const userRef = useRef<User | null>(null)
+  const roomRef = useRef<Room | null>(null)
+  const handleMessageRef = useRef<(msg: ServerMessage) => void>(() => {})
   const bottomRef = useRef<HTMLDivElement | null>(null)
 
   const wsUrl = useMemo(() => getWsUrl(), [])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [lines])
+    document.documentElement.setAttribute('data-theme', theme)
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme)
+    } catch {
+      // ignore
+    }
+  }, [theme])
+
+  function toggleTheme() {
+    setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))
+  }
 
   useEffect(() => {
-    return () => socketRef.current?.close()
-  }, [])
-
-  function ensureSocket() {
-    if (socketRef.current) return socketRef.current
-
-    const socket = new ChatSocket({
-      onOpen: () => {
-        setStatus('online')
-        const pending = pendingAuth.current
-        if (pending) {
-          socket.send({
-            type: 'auth',
-            username: pending.username,
-            profile: pending.profile,
-          })
-          pendingAuth.current = null
-        }
-      },
-      onClose: () => {
-        setStatus('offline')
-        setScreen('login')
-        setUser(null)
-        setRoom(null)
-        setRooms([])
-        setLines([])
-        setError('Conexão encerrada. Entre novamente.')
-        socketRef.current = null
-      },
-      onError: () => {
-        setStatus('error')
-        setError('Não foi possível conectar ao chatHub.')
-      },
-      onMessage: handleMessage,
-    })
-
-    socketRef.current = socket
-    return socket
-  }
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [lines])
 
   function handleMessage(msg: ServerMessage) {
     switch (msg.type) {
       case 'auth_ok':
         setUser(msg.user)
+        userRef.current = msg.user
+        setStatus('online')
         setError(null)
-        setScreen('lobby')
+        saveSession({
+          username: msg.user.username,
+          profile: msg.user.profile,
+          roomId: targetRoomId.current,
+        })
+
+        if (targetRoomId.current) {
+          socketRef.current?.send({ type: 'join_room', room_id: targetRoomId.current })
+        } else {
+          setScreen('lobby')
+        }
         break
+
       case 'profile_changed':
         setUser(msg.user)
+        userRef.current = msg.user
         setProfile(msg.user.profile)
         setError(null)
+        saveSession({
+          username: msg.user.username,
+          profile: msg.user.profile,
+          roomId: roomRef.current ? roomRef.current.room_id : null,
+        })
         break
+
       case 'rooms_list':
         setRooms(msg.rooms)
         break
+
       case 'room_created':
       case 'room_joined':
         setRoom(msg.room)
-        setUser((u) => (u ? { ...u, room_id: msg.room.room_id } : u))
+        roomRef.current = msg.room
+        setUser((u) => {
+          const updated = u ? { ...u, room_id: msg.room.room_id } : u
+          userRef.current = updated
+          return updated
+        })
         setLines([])
         setScreen('room')
         setError(null)
+        targetRoomId.current = msg.room.room_id
+        if (userRef.current) {
+          saveSession({
+            username: userRef.current.username,
+            profile: userRef.current.profile,
+            roomId: msg.room.room_id,
+          })
+        }
         break
+
       case 'chat_history':
         setLines(
           msg.messages.map((m) => ({
@@ -109,21 +178,39 @@ export default function App() {
           })),
         )
         break
+
       case 'room_update':
-        setRoom((current) =>
-          current && current.room_id === msg.room.room_id ? msg.room : current,
-        )
+        setRoom((current) => {
+          const next = current && current.room_id === msg.room.room_id ? msg.room : current
+          roomRef.current = next
+          return next
+        })
         setRooms((list) => {
           const others = list.filter((r) => r.room_id !== msg.room.room_id)
           return [...others, msg.room].sort((a, b) => a.name.localeCompare(b.name))
         })
         break
+
       case 'room_left':
         setRoom(null)
-        setUser((u) => (u ? { ...u, room_id: null } : u))
+        roomRef.current = null
+        setUser((u) => {
+          const updated = u ? { ...u, room_id: null } : u
+          userRef.current = updated
+          return updated
+        })
         setLines([])
         setScreen('lobby')
+        targetRoomId.current = null
+        if (userRef.current) {
+          saveSession({
+            username: userRef.current.username,
+            profile: userRef.current.profile,
+            roomId: null,
+          })
+        }
         break
+
       case 'chat':
         setLines((prev) => [
           ...prev,
@@ -136,6 +223,7 @@ export default function App() {
           },
         ])
         break
+
       case 'system':
         setLines((prev) => [
           ...prev,
@@ -150,11 +238,87 @@ export default function App() {
           },
         ])
         break
+
       case 'error':
+        if (msg.code === 'room_not_found') {
+          targetRoomId.current = null
+          if (userRef.current) {
+            saveSession({
+              username: userRef.current.username,
+              profile: userRef.current.profile,
+              roomId: null,
+            })
+          }
+          setScreen('lobby')
+        }
         setError(msg.message)
+        setStatus((prev) => (prev === 'connecting' ? 'idle' : prev))
         break
     }
   }
+
+  handleMessageRef.current = handleMessage
+
+  function ensureSocket() {
+    if (socketRef.current) return socketRef.current
+
+    const socket = new ChatSocket({
+      onOpen: () => {
+        const pending = pendingAuth.current
+        if (pending) {
+          socket.send({
+            type: 'auth',
+            username: pending.username,
+            profile: pending.profile,
+          })
+          pendingAuth.current = null
+        } else {
+          setStatus('online')
+        }
+      },
+      onClose: () => {
+        setStatus('offline')
+        socketRef.current = null
+      },
+      onError: () => {
+        setStatus('error')
+        setError('Não foi possível conectar ao chatHub.')
+      },
+      onMessage: (msg) => handleMessageRef.current(msg),
+    })
+
+    socketRef.current = socket
+    return socket
+  }
+
+  function connectWith(name: string, prof: Profile) {
+    setError(null)
+    setStatus('connecting')
+    pendingAuth.current = { username: name, profile: prof }
+    const socket = ensureSocket()
+    if (socket.connected) {
+      socket.send({ type: 'auth', username: name, profile: prof })
+      pendingAuth.current = null
+    } else {
+      socket.connect(wsUrl)
+    }
+  }
+
+  // Restaura sessão do localStorage automaticamente ao carregar/dar refresh
+  useEffect(() => {
+    const saved = loadSavedSession()
+    if (saved) {
+      setUsername(saved.username)
+      setProfile(saved.profile)
+      targetRoomId.current = saved.roomId
+      connectWith(saved.username, saved.profile)
+    }
+
+    return () => {
+      socketRef.current?.close()
+      socketRef.current = null
+    }
+  }, [])
 
   function onLogin(e: FormEvent) {
     e.preventDefault()
@@ -163,16 +327,23 @@ export default function App() {
       setError('Informe um username.')
       return
     }
+    connectWith(name, profile)
+  }
+
+  function logout() {
+    saveSession(null)
+    targetRoomId.current = null
+    userRef.current = null
+    roomRef.current = null
+    socketRef.current?.close()
+    socketRef.current = null
+    setUser(null)
+    setRoom(null)
+    setRooms([])
+    setLines([])
+    setScreen('login')
+    setStatus('idle')
     setError(null)
-    setStatus('connecting')
-    pendingAuth.current = { username: name, profile }
-    const socket = ensureSocket()
-    if (socket.connected) {
-      socket.send({ type: 'auth', username: name, profile })
-      pendingAuth.current = null
-    } else {
-      socket.connect(wsUrl)
-    }
   }
 
   function refreshRooms() {
@@ -222,9 +393,61 @@ export default function App() {
             <p className="brand-sub">salas em tempo real</p>
           </div>
         </div>
-        <div className={`status status-${status}`}>
-          <span className="dot" />
-          {statusLabel(status)}
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Mudar para tema claro' : 'Mudar para tema escuro'}
+            aria-label={theme === 'dark' ? 'Mudar para tema claro' : 'Mudar para tema escuro'}
+          >
+            {theme === 'dark' ? (
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="5" />
+                <line x1="12" y1="1" x2="12" y2="3" />
+                <line x1="12" y1="21" x2="12" y2="23" />
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                <line x1="1" y1="12" x2="3" y2="12" />
+                <line x1="21" y1="12" x2="23" y2="12" />
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+              </svg>
+            ) : (
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
+          </button>
+          <div className={`status status-${status}`}>
+            <span className="dot" />
+            {statusLabel(status)}
+          </div>
+          {user && (
+            <button type="button" className="ghost danger" onClick={logout} title="Desconectar do chatHub">
+              Sair da conta
+            </button>
+          )}
         </div>
       </header>
 
@@ -287,9 +510,11 @@ export default function App() {
                   <span className="profile-badge">{user.profile}</span>
                 </p>
               </div>
-              <button type="button" className="ghost" onClick={refreshRooms}>
-                Atualizar
-              </button>
+              <div className="panel-actions">
+                <button type="button" className="ghost" onClick={refreshRooms}>
+                  Atualizar
+                </button>
+              </div>
             </div>
 
             <fieldset className="profiles lobby-profiles">

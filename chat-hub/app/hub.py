@@ -37,7 +37,14 @@ class HubState:
                 f"Perfil inválido. Use: {', '.join(sorted(VALID_PROFILES))}",
             )
         if any(u.username == username for u in self.users_by_id.values()):
-            return None, P.error("username_taken", "Username já em uso.")
+            # Se for uma reconexão (ex: refresh de página rápido), desconecta o socket anterior
+            old_user = next((u for u in self.users_by_id.values() if u.username == username), None)
+            if old_user and old_user.websocket != websocket:
+                await self.disconnect(old_user.websocket)
+                try:
+                    await old_user.websocket.close()
+                except (OSError, RuntimeError):
+                    pass
 
         if websocket in self.users_by_ws:
             await self.disconnect(websocket)
