@@ -1,144 +1,72 @@
-# Chat Hub - Sistema de Chat em Tempo Real
+# chatHub
 
-Um sistema de chat em tempo real usando WebSockets com Python, Docker e monitoramento completo.
+Chat em tempo real via WebSocket, com salas, perfis e **PostgreSQL**.
 
-## 🚀 Como Usar
+Backend Python (`asyncio` + `websockets` + `asyncpg`). Frontend web em [`../web`](../web/README.md).
 
-### 1. Iniciar o Servidor
+## Documentação
+
+Tudo está em **[docs/](docs/README.md)**:
+
+- [Visão geral](docs/overview.md)
+- [Começando](docs/getting-started.md)
+- [Arquitetura](docs/architecture.md)
+- [API WebSocket](docs/api.md)
+- [Perfis e salas](docs/rooms-and-profiles.md)
+- [Banco de dados](docs/database.md)
+
+## Variáveis de ambiente
+
+Copie o exemplo e ajuste se necessário:
+
 ```bash
-# Inicia o servidor em container Docker
+cp .env.example .env
+```
+
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `POSTGRES_USER` | Usuário do banco | `chathub` |
+| `POSTGRES_PASSWORD` | Senha do banco | `chathub` |
+| `POSTGRES_DB` | Nome do banco | `chathub` |
+| `POSTGRES_HOST` | Host (`localhost` no host; `db` no Docker) | `localhost` |
+| `POSTGRES_PORT` | Porta do Postgres | `5432` |
+| `PORT` | Porta WebSocket do app | `8765` |
+| `DATABASE_URL` | URL completa (opcional; sobrescreve as vars acima) | montada automaticamente |
+
+O `docker-compose.yml` lê o `.env` e define `POSTGRES_HOST=db` no serviço `chat-hub`.
+
+## Quick start
+
+```bash
 docker-compose up -d --build
+python clients/cliente.py
 ```
 
-### 2. Monitor de Chat (Recomendado)
+Sobe Postgres (`localhost:5432`) e WebSocket (`ws://localhost:8765`).
+
+## Desenvolvimento local (sem container do app)
+
 ```bash
-# Abra um terminal e execute o monitor
-python monitor.py
+docker-compose up -d db
+pip install -r requirements.txt
+python -m app
 ```
-O monitor mostra:
-- ✅ Clientes conectados/desconectados
-- 💬 Todas as mensagens trocadas
-- 📊 Estatísticas em tempo real
-- 📨 Histórico completo do chat
 
-### 3. Clientes de Chat
+O app carrega `chat-hub/.env` e conecta em `POSTGRES_HOST=localhost`.
 
-#### Cliente Manual
+## Clientes de teste
+
 ```bash
-# Abra outro terminal para um cliente manual
-python cliente.py
+python clients/cliente.py      # CLI interativo
+python clients/teste_salas.py    # cenários automatizados
 ```
 
-#### Simulador de Múltiplos Clientes
+Atalhos do CLI: `/auth`, `/create`, `/rooms`, `/join`, `/leave`, `/help`
+
+## Frontend
+
+Interface React em [`../web`](../web/README.md):
+
 ```bash
-# Para testar com vários clientes automaticamente
-python teste_multi_clientes.py
+cd ../web && npm install && npm run dev
 ```
-
-## 📁 Arquivos do Projeto
-
-- `servidor.py` - Servidor WebSocket principal
-- `cliente.py` - Cliente manual para chat
-- `monitor.py` - Painel de monitoramento/admin
-- `teste_multi_clientes.py` - Simulador de múltiplos clientes
-- `docker-compose.yml` - Configuração Docker
-- `Dockerfile` - Imagem Docker
-- `requirements.txt` - Dependências Python
-
-## 🎯 Funcionalidades
-
-### Servidor (`servidor.py`)
-- ✅ Gerencia conexões WebSocket
-- ✅ Transmite mensagens entre clientes
-- ✅ Notifica entrada/saída de usuários
-- ✅ Suporte a múltiplos clientes simultâneos
-
-### Cliente (`cliente.py`)
-- ✅ Interface de chat interativa
-- ✅ Envio e recebimento de mensagens
-- ✅ Tratamento de desconexão
-- ✅ Suporte a Ctrl+C para sair
-
-### Monitor (`monitor.py`)
-- ✅ Visualização de todos os clientes conectados
-- ✅ Histórico completo de mensagens
-- ✅ Estatísticas em tempo real
-- ✅ Timestamps em todas as mensagens
-- ✅ Relatórios periódicos automáticos
-
-### Simulador (`teste_multi_clientes.py`)
-- ✅ Teste automático com múltiplos clientes
-- ✅ Mensagens pré-definidas
-- ✅ Delays aleatórios para simular comportamento real
-- ✅ Útil para testes de carga
-
-## 🔧 Configuração
-
-### Porta
-O servidor roda na porta `8765` por padrão.
-
-### Docker
-- Container: `chat-hub`
-- Porta mapeada: `8765:8765`
-- Restart automático: `unless-stopped`
-
-## 📊 Exemplo de Uso
-
-1. **Terminal 1 - Monitor:**
-```bash
-python monitor.py
-```
-
-2. **Terminal 2 - Cliente 1:**
-```bash
-python cliente.py
-# Digite: "Oi pessoal!"
-```
-
-3. **Terminal 3 - Cliente 2:**
-```bash
-python cliente.py
-# Digite: "Olá! Como vai?"
-```
-
-4. **Terminal 4 - Simulador:**
-```bash
-python teste_multi_clientes.py
-```
-
-## 🎨 Interface do Monitor
-
-O monitor mostra:
-- 🟢 Cliente entrou no chat
-- 🔴 Cliente saiu do chat  
-- 💬 Mensagem de chat
-- 📊 Estatísticas automáticas a cada 30 segundos
-
-## 🛠️ Troubleshooting
-
-### Erro de Conexão
-```bash
-# Verifique se o container está rodando
-docker ps
-
-# Verifique os logs
-docker logs chat-hub
-```
-
-### Porta em Uso
-```bash
-# Pare o container
-docker-compose down
-
-# Reinicie
-docker-compose up -d --build
-```
-
-## 📈 Próximas Melhorias
-
-- [ ] Interface web com HTML/CSS/JavaScript
-- [ ] Persistência de mensagens em banco de dados
-- [ ] Autenticação de usuários
-- [ ] Salas de chat separadas
-- [ ] Envio de arquivos
-- [ ] Emojis e formatação de texto 

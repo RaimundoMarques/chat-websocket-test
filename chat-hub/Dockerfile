@@ -1,19 +1,15 @@
 # Dockerfile
-# Imagem base Python
 FROM python:3.11-slim
 
-# Define diretório de trabalho dentro do container
 WORKDIR /app
 
-# Copia os arquivos do projeto
 COPY requirements.txt .
-COPY servidor.py .
-
-# Instala dependências
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Expõe a porta 8765 (WebSocket)
+COPY app ./app
+COPY db ./db
+COPY servidor.py .
+
 EXPOSE 8765
 
-# Comando para iniciar o servidor
-CMD ["python", "servidor.py"]
+CMD ["python", "-m", "app"]
