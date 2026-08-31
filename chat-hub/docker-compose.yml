@@ -1,9 +1,6 @@
-# docker-compose.yml
-
 services:
   db:
     image: postgres:16-alpine
-    # Usa só a imagem já presente na máquina (não baixa da internet)
     pull_policy: never
     container_name: chathub-db
     env_file: .env
@@ -12,7 +9,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_HOST_PORT:-5434}:5432"
     volumes:
       - chathub_pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
@@ -34,6 +31,16 @@ services:
       POSTGRES_HOST: db
     ports:
       - "${PORT:-8765}:8765"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ../web
+    container_name: chathub-web
+    depends_on:
+      - chat-hub
+    ports:
+      - "${WEB_PORT:-5173}:80"
     restart: unless-stopped
 
 volumes:

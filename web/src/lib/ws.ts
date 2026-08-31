@@ -1,9 +1,13 @@
 import type { ServerMessage } from '../types'
 
-const DEFAULT_WS_URL = 'ws://localhost:8765'
+const DEFAULT_DEV_WS_URL = 'ws://localhost:8765'
 
 export function getWsUrl(): string {
-  return import.meta.env.VITE_WS_URL ?? DEFAULT_WS_URL
+  const fromEnv = import.meta.env.VITE_WS_URL
+  if (fromEnv) return fromEnv
+  if (import.meta.env.DEV) return DEFAULT_DEV_WS_URL
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${proto}//${window.location.host}/ws`
 }
 
 type Handlers = {
